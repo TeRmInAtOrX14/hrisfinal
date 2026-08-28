@@ -29,7 +29,9 @@ export const openBrandigadeDialer = () => {
       if (document.body.contains(iframe)) {
         document.body.removeChild(iframe);
       }
-    } catch (_) {}
+    } catch {
+      // The iframe may already be gone; nothing to clean up.
+    }
 
     window.removeEventListener('blur', onWindowBlur);
 

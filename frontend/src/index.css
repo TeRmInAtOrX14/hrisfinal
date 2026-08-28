@@ -311,6 +311,34 @@
    ============================================================================== */
 [data-theme="light"] {
   /* Prevent static text-white from blending in light background except inside solid primary buttons */
+  
+  /* `hover:text-white` / `focus:text-white` are distinct classes from
+     `text-white`, so the override below never reached them: 41 nav items,
+     buttons and table actions across the app turned white-on-white the moment
+     the cursor touched them in light mode. */
+  .hover\:text-white:hover:not(
+    button.brandigade-gradient,
+    .brandigade-gradient *,
+    .bg-brand-blue, .bg-brand-blue *,
+    .bg-brand-violet, .bg-brand-violet *,
+    .bg-brand-green, .bg-brand-green *,
+    .bg-brand-cyan, .bg-brand-cyan *,
+    .bg-brand-red, .bg-brand-red *,
+    .bg-brand-amber, .bg-brand-amber *
+  ),
+  .focus\:text-white:focus:not(
+    .brandigade-gradient *,
+    .bg-brand-blue *, .bg-brand-violet *, .bg-brand-green *,
+    .bg-brand-cyan *, .bg-brand-red *, .bg-brand-amber *
+  ) {
+    color: var(--brand-text) !important;
+  }
+
+  /* Hover backgrounds tuned for a dark canvas wash out on a light one. */
+  .hover\:bg-white\/10:hover {
+    background-color: rgba(15, 23, 42, 0.05) !important;
+  }
+
   .text-white:not(
     button *, 
     button, 
@@ -442,9 +470,9 @@
     background-color: rgba(37, 99, 235, 0.08) !important;
   }
   
-  /* Text override for matched commission structure items */
-  .text-brand-cyan {
-    color: var(--brand-blue) !important;
-  }
+  /* Cyan on white fails contrast for body copy, but blanket-overriding every
+     .text-brand-cyan also flattened icons and badges that carry meaning. Darken
+     the token itself instead so accents stay distinguishable. */
+  --brand-cyan: #0e7490;
 }
 

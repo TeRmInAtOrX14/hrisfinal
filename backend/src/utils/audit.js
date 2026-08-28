@@ -1,28 +1,58 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../lib/prisma');
+
+/** Keys that must never be written into an audit record. */
+const REDACTED_KEYS = new Set([
+  'password',
+  'newPassword',
+  'currentPassword',
+  'passwordHash',
+  'refreshToken',
+  'token',
+  'idToken',
+]);
+
+function redact(value) {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(redact);
+
+  const out = {};
+  for (const [key, val] of Object.entries(value)) {
+    out[key] = REDACTED_KEYS.has(key) ? '[redacted]' : redact(val);
+  }
+  return out;
+}
 
 /**
- * Log an audit trail entry
- * @param {string} userId - ID of the user performing the action
- * @param {string} action - Action details (e.g. 'CREATE_EMPLOYEE', 'APPROVE_LEAVE')
- * @param {string} entityType - Model name (e.g. 'Employee', 'LeaveRequest')
- * @param {string} entityId - ID of the affected entity
- * @param {object} details - Any metadata/diffs (serializable to JSON)
+ * Write an audit trail entry.
+ *
+ * `details` is a Json column, so the object is stored as JSON. The previous
+ * version called JSON.stringify first, which stored a JSON *string* — the audit
+ * viewer then had to parse the value back out, and any caller that passed a
+ * plain object crashed the page. Credentials are stripped before writing;
+ * employee updates were previously logged with the plaintext password included.
+ *
+ * Audit failures never interrupt the action being audited.
+ *
+ * @param {string|null} userId  Actor performing the action
+ * @param {string} action       e.g. 'CREATE_EMPLOYEE', 'REVIEW_LEAVE_REQUEST'
+ * @param {string} entityType   Model name, e.g. 'Employee'
+ * @param {string|null} entityId
+ * @param {object|null} details Serializable metadata
  */
 async function logAudit(userId, action, entityType, entityId = null, details = null) {
   try {
     await prisma.auditLog.create({
       data: {
-        userId,
+        userId: userId || null,
         action,
         entityType,
         entityId,
-        details: details ? JSON.stringify(details) : null
-      }
+        details: details ? redact(details) : undefined,
+      },
     });
   } catch (error) {
     console.error('[Audit Log Failure]:', error.message);
   }
 }
 
-module.exports = { logAudit };
+module.exports = { logAudit, redact };

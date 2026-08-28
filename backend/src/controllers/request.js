@@ -1,484 +1,314 @@
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../lib/prisma');
 const { logAudit } = require('../utils/audit');
+const { notifyEmployee, notifyAdmins, reviewOutcome } = require('../utils/notify');
+const { resolveEmployeeFilter } = require('../utils/scope');
+const { toDateOnly, datesInRange } = require('../utils/attendanceTime');
 
-const prisma = new PrismaClient();
+/**
+ * Leave / half-day / WFH request workflows.
+ *
+ * The three request types are near-identical, so the list and review flows are
+ * expressed once and specialised per type. This replaces roughly 300 lines of
+ * copy-pasted handlers whose RBAC branches had drifted apart — the Employee/SDR
+ * branch dereferenced `req.user.employee.id` with no null check, so a user with
+ * no employee profile got a 500 instead of a 400.
+ */
 
-async function getTeamLeadSdrIds(leadEmployeeId) {
-  const activeCampaigns = await prisma.campaignMember.findMany({
-    where: { employeeId: leadEmployeeId, role: 'team_lead', status: 'active' },
-    select: { campaignId: true }
-  });
-  const campaignIds = activeCampaigns.map(c => c.campaignId);
-  const members = await prisma.campaignMember.findMany({
-    where: { campaignId: { in: campaignIds }, status: 'active' },
-    select: { employeeId: true }
-  });
-  return members.map(m => m.employeeId);
-}
+const REQUEST_TYPES = {
+  leave: {
+    model: 'leaveRequest',
+    label: 'Leave request',
+    auditPrefix: 'LEAVE_REQUEST',
+    attendanceStatus: 'leave',
+  },
+  halfday: {
+    model: 'halfdayRequest',
+    label: 'Half-day request',
+    auditPrefix: 'HALFDAY_REQUEST',
+    attendanceStatus: 'half_day',
+  },
+  wfh: {
+    model: 'wfhRequest',
+    label: 'Work-from-home request',
+    auditPrefix: 'WFH_REQUEST',
+    attendanceStatus: 'wfh',
+  },
+};
 
-// Helper to get dates between two dates
-function getDatesInRange(startDate, endDate) {
-  const dates = [];
-  let curr = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate()));
-  const end = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()));
-  
-  while (curr <= end) {
-    dates.push(new Date(curr));
-    curr.setUTCDate(curr.getUTCDate() + 1);
+const EMPLOYEE_SELECT = {
+  select: { id: true, fullName: true, employeeCode: true, designation: true },
+};
+
+/** Overlapping-request guard: staff should not stack two leaves on the same day. */
+async function hasOverlap(model, employeeId, start, end, shape) {
+  if (shape === 'single') {
+    const existing = await prisma[model].findFirst({
+      where: { employeeId, date: start, status: { in: ['pending', 'approved'] } },
+    });
+    return Boolean(existing);
   }
-  return dates;
+
+  const existing = await prisma[model].findFirst({
+    where: {
+      employeeId,
+      status: { in: ['pending', 'approved'] },
+      startDate: { lte: end },
+      endDate: { gte: start },
+    },
+  });
+  return Boolean(existing);
 }
 
-// ==============================================================================
-// Leave Requests
-// ==============================================================================
+// ---------------------------------------------------------------------------
+// List
+// ---------------------------------------------------------------------------
+
+function makeList(kind) {
+  const { model } = REQUEST_TYPES[kind];
+
+  return async (req, res, next) => {
+    try {
+      const { status, employeeId } = req.query;
+
+      const scope = await resolveEmployeeFilter(req.user, employeeId);
+      if (!scope.ok) {
+        return res.status(scope.status).json({ error: scope.error });
+      }
+
+      const where = {};
+      if (status) where.status = status;
+      if (scope.filter !== undefined) where.employeeId = scope.filter;
+
+      const requests = await prisma[model].findMany({
+        where,
+        include: { employee: EMPLOYEE_SELECT },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      res.json(requests);
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
+/**
+ * "My requests" — always scoped to the caller regardless of role.
+ *
+ * The UI has a "My Requests Log" tab, but it called the same unfiltered list
+ * endpoint, so an admin's personal tab showed every request in the company.
+ */
+function makeMine(kind) {
+  const { model } = REQUEST_TYPES[kind];
+
+  return async (req, res, next) => {
+    try {
+      const requests = await prisma[model].findMany({
+        where: { employeeId: req.user.employee.id },
+        orderBy: { createdAt: 'desc' },
+      });
+      res.json(requests);
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Review (approve / reject)
+// ---------------------------------------------------------------------------
+
+function makeReview(kind) {
+  const { model, label, auditPrefix, attendanceStatus } = REQUEST_TYPES[kind];
+
+  return async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const { status, reviewNote } = req.body;
+
+      const request = await prisma[model].findUnique({
+        where: { id },
+        include: { employee: { select: { id: true, fullName: true } } },
+      });
+
+      if (!request) {
+        return res.status(404).json({ error: `${label} not found` });
+      }
+
+      if (request.status !== 'pending') {
+        return res.status(409).json({ error: 'This request has already been reviewed.' });
+      }
+
+      const updated = await prisma.$transaction(async (tx) => {
+        const row = await tx[model].update({
+          where: { id },
+          data: { status, reviewedById: req.user.id, reviewedAt: new Date() },
+        });
+
+        if (status === 'approved') {
+          const dates =
+            kind === 'halfday' ? [request.date] : datesInRange(request.startDate, request.endDate);
+
+          const note = reviewNote ? `${label} approved: ${reviewNote}` : `${label} approved`;
+
+          for (const date of dates) {
+            await tx.attendance.upsert({
+              where: { employeeId_date: { employeeId: request.employeeId, date } },
+              create: {
+                employeeId: request.employeeId,
+                date,
+                status: attendanceStatus,
+                late: 0,
+                earlyDeparture: 0,
+                overtime: 0,
+                note,
+              },
+              // A half-day keeps whatever the device recorded; leave and WFH days
+              // clear the late penalty, since the employee is not expected in the
+              // office at the usual time.
+              update:
+                kind === 'halfday'
+                  ? { status: attendanceStatus, note }
+                  : { status: attendanceStatus, late: 0, earlyDeparture: 0, overtime: 0, note },
+            });
+          }
+        }
+
+        return row;
+      });
+
+      await logAudit(req.user.id, `REVIEW_${auditPrefix}`, model, id, {
+        status,
+        employeeId: request.employeeId,
+      });
+
+      await notifyEmployee(request.employeeId, reviewOutcome(kind, status, reviewNote));
+
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Create
+// ---------------------------------------------------------------------------
 
 exports.createLeaveRequest = async (req, res, next) => {
   try {
     const { type, startDate, endDate, reason } = req.body;
+    const employeeId = req.user.employee.id;
 
-    if (!req.user.employee) {
-      return res.status(400).json({ error: 'No employee profile linked to user.' });
+    const start = toDateOnly(startDate);
+    const end = toDateOnly(endDate);
+
+    if (await hasOverlap('leaveRequest', employeeId, start, end, 'range')) {
+      return res.status(409).json({
+        error: 'You already have a pending or approved leave request covering these dates.',
+      });
     }
 
-    if (!type || !startDate || !endDate) {
-      return res.status(400).json({ error: 'Type, startDate, and endDate are required' });
-    }
-
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-    
-    // Calculate total days (inclusive)
-    const diffTime = Math.abs(end - start);
-    const days = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+    // Inclusive day count. The old version divided the absolute millisecond
+    // difference by 86_400_000 and added one, which mis-counts whenever the two
+    // instants are not an exact multiple of 24 hours apart.
+    const days = datesInRange(start, end).length;
 
     const request = await prisma.leaveRequest.create({
-      data: {
-        employeeId: req.user.employee.id,
-        type,
-        startDate: new Date(Date.UTC(start.getFullYear(), start.getMonth(), start.getDate())),
-        endDate: new Date(Date.UTC(end.getFullYear(), end.getMonth(), end.getDate())),
-        days,
-        reason,
-        status: 'pending'
-      }
+      data: { employeeId, type, startDate: start, endDate: end, days, reason, status: 'pending' },
     });
 
     await logAudit(req.user.id, 'SUBMIT_LEAVE_REQUEST', 'LeaveRequest', request.id, { type, days });
+    await notifyAdmins({
+      title: 'New leave request',
+      message: `${req.user.employee.fullName} requested ${days} day(s) of ${type} leave.`,
+      type: 'leave',
+      link: '/dashboard/requests',
+    });
+
     res.status(201).json(request);
   } catch (err) {
     next(err);
   }
 };
-
-exports.getLeaveRequests = async (req, res, next) => {
-  try {
-    const { status, employeeId } = req.query;
-
-    const where = {};
-    if (status) where.status = status;
-
-    // RBAC
-    if (['Employee', 'SDR'].includes(req.user.role)) {
-      where.employeeId = req.user.employee.id;
-    } else if (req.user.role === 'Team Lead') {
-      const sdrIds = await getTeamLeadSdrIds(req.user.employee?.id);
-      if (employeeId) {
-        if (!sdrIds.includes(employeeId)) {
-          return res.status(403).json({ error: 'Access denied.' });
-        }
-        where.employeeId = employeeId;
-      } else {
-        where.employeeId = { in: sdrIds };
-      }
-    } else {
-      if (employeeId) where.employeeId = employeeId;
-    }
-
-    const requests = await prisma.leaveRequest.findMany({
-      where,
-      include: {
-        employee: {
-          select: { id: true, fullName: true, employeeCode: true, designation: true }
-        }
-      },
-      orderBy: { createdAt: 'desc' }
-    });
-
-    res.json(requests);
-  } catch (err) {
-    next(err);
-  }
-};
-
-exports.reviewLeaveRequest = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body; // approved, rejected
-
-    if (req.user.role === 'Team Lead') {
-      return res.status(403).json({ error: 'Access denied: Team Leads do not have approval authority.' });
-    }
-
-    if (!['approved', 'rejected'].includes(status)) {
-      return res.status(400).json({ error: 'Invalid status. Must be approved or rejected.' });
-    }
-
-    const request = await prisma.leaveRequest.findUnique({
-      where: { id },
-      include: { employee: true }
-    });
-
-    if (!request) {
-      return res.status(404).json({ error: 'Leave request not found' });
-    }
-
-    if (request.status !== 'pending') {
-      return res.status(400).json({ error: 'Request has already been reviewed.' });
-    }
-
-    const updatedRequest = await prisma.$transaction(async (tx) => {
-      const updated = await tx.leaveRequest.update({
-        where: { id },
-        data: {
-          status,
-          reviewedById: req.user.id,
-          reviewedAt: new Date()
-        }
-      });
-
-      // If approved, automatically update/create attendance records for those dates
-      if (status === 'approved') {
-        const dates = getDatesInRange(request.startDate, request.endDate);
-        for (const date of dates) {
-          await tx.attendance.upsert({
-            where: {
-              employeeId_date: {
-                employeeId: request.employeeId,
-                date
-              }
-            },
-            create: {
-              employeeId: request.employeeId,
-              date,
-              status: 'leave',
-              late: 0,
-              earlyDeparture: 0,
-              overtime: 0,
-              note: `Approved Leave: ${request.type}`
-            },
-            update: {
-              status: 'leave',
-              late: 0,
-              earlyDeparture: 0,
-              overtime: 0,
-              note: `Approved Leave: ${request.type}`
-            }
-          });
-        }
-      }
-
-      return updated;
-    });
-
-    await logAudit(req.user.id, 'REVIEW_LEAVE_REQUEST', 'LeaveRequest', id, { status });
-    res.json(updatedRequest);
-  } catch (err) {
-    next(err);
-  }
-};
-
-// ==============================================================================
-// Half-day Requests
-// ==============================================================================
 
 exports.createHalfdayRequest = async (req, res, next) => {
   try {
     const { date, reason } = req.body;
+    const employeeId = req.user.employee.id;
+    const day = toDateOnly(date);
 
-    if (!req.user.employee) {
-      return res.status(400).json({ error: 'No employee profile linked to user.' });
+    if (await hasOverlap('halfdayRequest', employeeId, day, day, 'single')) {
+      return res.status(409).json({
+        error: 'You already have a pending or approved half-day request for this date.',
+      });
     }
-
-    if (!date) {
-      return res.status(400).json({ error: 'Date is required' });
-    }
-
-    const dateObj = new Date(date);
-    const dateMidnight = new Date(Date.UTC(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate()));
 
     const request = await prisma.halfdayRequest.create({
-      data: {
-        employeeId: req.user.employee.id,
-        date: dateMidnight,
-        reason,
-        status: 'pending'
-      }
+      data: { employeeId, date: day, reason, status: 'pending' },
     });
 
     await logAudit(req.user.id, 'SUBMIT_HALFDAY_REQUEST', 'HalfdayRequest', request.id, { date });
+    await notifyAdmins({
+      title: 'New half-day request',
+      message: `${req.user.employee.fullName} requested a half-day.`,
+      type: 'leave',
+      link: '/dashboard/requests',
+    });
+
     res.status(201).json(request);
   } catch (err) {
     next(err);
   }
 };
-
-exports.getHalfdayRequests = async (req, res, next) => {
-  try {
-    const { status, employeeId } = req.query;
-
-    const where = {};
-    if (status) where.status = status;
-
-    // RBAC
-    if (['Employee', 'SDR'].includes(req.user.role)) {
-      where.employeeId = req.user.employee.id;
-    } else if (req.user.role === 'Team Lead') {
-      const sdrIds = await getTeamLeadSdrIds(req.user.employee?.id);
-      if (employeeId) {
-        if (!sdrIds.includes(employeeId)) {
-          return res.status(403).json({ error: 'Access denied.' });
-        }
-        where.employeeId = employeeId;
-      } else {
-        where.employeeId = { in: sdrIds };
-      }
-    } else {
-      if (employeeId) where.employeeId = employeeId;
-    }
-
-    const requests = await prisma.halfdayRequest.findMany({
-      where,
-      include: {
-        employee: {
-          select: { id: true, fullName: true, employeeCode: true, designation: true }
-        }
-      },
-      orderBy: { createdAt: 'desc' }
-    });
-
-    res.json(requests);
-  } catch (err) {
-    next(err);
-  }
-};
-
-exports.reviewHalfdayRequest = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
-
-    if (req.user.role === 'Team Lead') {
-      return res.status(403).json({ error: 'Access denied: Team Leads do not have approval authority.' });
-    }
-
-    if (!['approved', 'rejected'].includes(status)) {
-      return res.status(400).json({ error: 'Invalid status' });
-    }
-
-    const request = await prisma.halfdayRequest.findUnique({
-      where: { id }
-    });
-
-    if (!request) {
-      return res.status(404).json({ error: 'Request not found' });
-    }
-
-    if (request.status !== 'pending') {
-      return res.status(400).json({ error: 'Request already reviewed' });
-    }
-
-    const updatedRequest = await prisma.$transaction(async (tx) => {
-      const updated = await tx.halfdayRequest.update({
-        where: { id },
-        data: {
-          status,
-          reviewedById: req.user.id,
-          reviewedAt: new Date()
-        }
-      });
-
-      if (status === 'approved') {
-        await tx.attendance.upsert({
-          where: {
-            employeeId_date: {
-              employeeId: request.employeeId,
-              date: request.date
-            }
-          },
-          create: {
-            employeeId: request.employeeId,
-            date: request.date,
-            status: 'half_day',
-            late: 0,
-            earlyDeparture: 0,
-            overtime: 0,
-            note: 'Approved Half-day Request'
-          },
-          update: {
-            status: 'half_day',
-            note: 'Approved Half-day Request'
-          }
-        });
-      }
-
-      return updated;
-    });
-
-    await logAudit(req.user.id, 'REVIEW_HALFDAY_REQUEST', 'HalfdayRequest', id, { status });
-    res.json(updatedRequest);
-  } catch (err) {
-    next(err);
-  }
-};
-
-// ==============================================================================
-// WFH Requests
-// ==============================================================================
 
 exports.createWfhRequest = async (req, res, next) => {
   try {
     const { startDate, endDate, reason } = req.body;
+    const employeeId = req.user.employee.id;
 
-    if (!req.user.employee) {
-      return res.status(400).json({ error: 'No employee profile linked to user.' });
+    const start = toDateOnly(startDate);
+    const end = toDateOnly(endDate);
+
+    if (await hasOverlap('wfhRequest', employeeId, start, end, 'range')) {
+      return res.status(409).json({
+        error: 'You already have a pending or approved WFH request covering these dates.',
+      });
     }
-
-    if (!startDate || !endDate) {
-      return res.status(400).json({ error: 'startDate and endDate are required' });
-    }
-
-    const start = new Date(startDate);
-    const end = new Date(endDate);
 
     const request = await prisma.wfhRequest.create({
-      data: {
-        employeeId: req.user.employee.id,
-        startDate: new Date(Date.UTC(start.getFullYear(), start.getMonth(), start.getDate())),
-        endDate: new Date(Date.UTC(end.getFullYear(), end.getMonth(), end.getDate())),
-        reason,
-        status: 'pending'
-      }
+      data: { employeeId, startDate: start, endDate: end, reason, status: 'pending' },
     });
 
-    await logAudit(req.user.id, 'SUBMIT_WFH_REQUEST', 'WfhRequest', request.id, { startDate, endDate });
+    await logAudit(req.user.id, 'SUBMIT_WFH_REQUEST', 'WfhRequest', request.id, {
+      startDate,
+      endDate,
+    });
+    await notifyAdmins({
+      title: 'New WFH request',
+      message: `${req.user.employee.fullName} requested to work from home.`,
+      type: 'leave',
+      link: '/dashboard/requests',
+    });
+
     res.status(201).json(request);
   } catch (err) {
     next(err);
   }
 };
 
-exports.getWfhRequests = async (req, res, next) => {
-  try {
-    const { status, employeeId } = req.query;
+// ---------------------------------------------------------------------------
+// Exports
+// ---------------------------------------------------------------------------
 
-    const where = {};
-    if (status) where.status = status;
+exports.getLeaveRequests = makeList('leave');
+exports.getHalfdayRequests = makeList('halfday');
+exports.getWfhRequests = makeList('wfh');
 
-    // RBAC
-    if (['Employee', 'SDR'].includes(req.user.role)) {
-      where.employeeId = req.user.employee.id;
-    } else if (req.user.role === 'Team Lead') {
-      const sdrIds = await getTeamLeadSdrIds(req.user.employee?.id);
-      if (employeeId) {
-        if (!sdrIds.includes(employeeId)) {
-          return res.status(403).json({ error: 'Access denied.' });
-        }
-        where.employeeId = employeeId;
-      } else {
-        where.employeeId = { in: sdrIds };
-      }
-    } else {
-      if (employeeId) where.employeeId = employeeId;
-    }
+exports.getMyLeaveRequests = makeMine('leave');
+exports.getMyHalfdayRequests = makeMine('halfday');
+exports.getMyWfhRequests = makeMine('wfh');
 
-    const requests = await prisma.wfhRequest.findMany({
-      where,
-      include: {
-        employee: {
-          select: { id: true, fullName: true, employeeCode: true, designation: true }
-        }
-      },
-      orderBy: { createdAt: 'desc' }
-    });
-
-    res.json(requests);
-  } catch (err) {
-    next(err);
-  }
-};
-
-exports.reviewWfhRequest = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
-
-    if (req.user.role === 'Team Lead') {
-      return res.status(403).json({ error: 'Access denied: Team Leads do not have approval authority.' });
-    }
-
-    if (!['approved', 'rejected'].includes(status)) {
-      return res.status(400).json({ error: 'Invalid status' });
-    }
-
-    const request = await prisma.wfhRequest.findUnique({
-      where: { id }
-    });
-
-    if (!request) {
-      return res.status(404).json({ error: 'Request not found' });
-    }
-
-    if (request.status !== 'pending') {
-      return res.status(400).json({ error: 'Request already reviewed' });
-    }
-
-    const updatedRequest = await prisma.$transaction(async (tx) => {
-      const updated = await tx.wfhRequest.update({
-        where: { id },
-        data: {
-          status,
-          reviewedById: req.user.id,
-          reviewedAt: new Date()
-        }
-      });
-
-      if (status === 'approved') {
-        const dates = getDatesInRange(request.startDate, request.endDate);
-        for (const date of dates) {
-          await tx.attendance.upsert({
-            where: {
-              employeeId_date: {
-                employeeId: request.employeeId,
-                date
-              }
-            },
-            create: {
-              employeeId: request.employeeId,
-              date,
-              status: 'wfh',
-              late: 0,
-              earlyDeparture: 0,
-              overtime: 0,
-              note: 'Approved WFH'
-            },
-            update: {
-              status: 'wfh',
-              late: 0,
-              earlyDeparture: 0,
-              overtime: 0,
-              note: 'Approved WFH'
-            }
-          });
-        }
-      }
-
-      return updated;
-    });
-
-    await logAudit(req.user.id, 'REVIEW_WFH_REQUEST', 'WfhRequest', id, { status });
-    res.json(updatedRequest);
-  } catch (err) {
-    next(err);
-  }
-};
+exports.reviewLeaveRequest = makeReview('leave');
+exports.reviewHalfdayRequest = makeReview('halfday');
+exports.reviewWfhRequest = makeReview('wfh');

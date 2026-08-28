@@ -1,28 +1,20 @@
 import React, { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import {
-  Briefcase,
   Plus,
   Percent,
   X,
   Loader2,
   DollarSign,
   Trash2,
-  Layers,
-  Users,
   Search,
   Filter,
-  TrendingUp,
   Award,
   Zap,
-  Calendar,
-  CheckCircle,
-  Copy,
   Info,
-  ChevronRight,
   ShieldAlert
 } from 'lucide-react';
-import api from '../utils/api';
+import api, { session, apiError } from '../utils/api';
 import toast from 'react-hot-toast';
 
 export default function Campaigns() {
@@ -62,10 +54,10 @@ export default function Campaigns() {
   const [assignRole, setAssignRole] = useState('sdr');
   const [assignEmployeeId, setAssignEmployeeId] = useState('');
 
-  const currentUser = JSON.parse(localStorage.getItem('user')) || { role: 'Employee' };
+  const currentUser = session.user || { role: 'Employee' };
   // Only Admin, CEO, COO can modify Campaigns or commissions. Team Lead is view-only supervisor.
   const isAdmin = ['Admin', 'CEO', 'COO'].includes(currentUser.role);
-  const isTeamLead = currentUser.role === 'Team Lead';
+  const _isTeamLead = currentUser.role === 'Team Lead';
 
   const { register, handleSubmit, reset, setValue } = useForm();
 
@@ -85,7 +77,7 @@ export default function Campaigns() {
         setEmployees(empRes.data);
       }
     } catch (e) {
-      toast.error('Failed to load campaigns');
+      toast.error(apiError(e, 'Failed to load campaigns.'));
     } finally {
       setLoading(false);
     }
@@ -93,6 +85,9 @@ export default function Campaigns() {
 
   useEffect(() => {
     fetchInitialData();
+    // Intentional mount-once fetch. These callbacks are recreated on every
+    // render, so listing them here would re-fetch in a loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Fetch performance dashboard data when selected campaign or active tab changes
@@ -103,6 +98,7 @@ export default function Campaigns() {
     if (selectedCampaignId && activeTab === 'commission_builder') {
       fetchStructures();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCampaignId, activeTab]);
 
   const fetchDashboard = async () => {
@@ -111,7 +107,7 @@ export default function Campaigns() {
       const res = await api.get(`/campaigns/${selectedCampaignId}/dashboard`);
       setDashboardData(res.data);
     } catch (err) {
-      toast.error('Failed to load campaign performance data');
+      toast.error(apiError(err, 'Failed to load campaign performance.'));
     } finally {
       setDashboardLoading(false);
     }
@@ -123,7 +119,7 @@ export default function Campaigns() {
       const res = await api.get(`/campaigns/${selectedCampaignId}/structures`);
       setStructures(res.data);
     } catch (err) {
-      toast.error('Failed to load commission structures');
+      toast.error(apiError(err, 'Failed to load commission structures.'));
     } finally {
       setStructuresLoading(false);
     }
@@ -141,7 +137,7 @@ export default function Campaigns() {
       setSelectedSdrIds([]);
       fetchInitialData();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to create campaign');
+      toast.error(apiError(err, 'Failed to create campaign.'));
     }
   };
 
@@ -152,7 +148,7 @@ export default function Campaigns() {
       setEditCampaignOpen(false);
       fetchInitialData();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to update campaign');
+      toast.error(apiError(err, 'Failed to update campaign.'));
     }
   };
 
@@ -165,7 +161,7 @@ export default function Campaigns() {
       toast.success(`Campaign marked as ${newStatus}`);
       fetchInitialData();
     } catch (err) {
-      toast.error('Failed to change campaign status');
+      toast.error(apiError(err, 'Failed to change campaign status.'));
     }
   };
 
@@ -175,7 +171,7 @@ export default function Campaigns() {
       toast.success(`Campaign duplicated successfully! Created: ${res.data.name}`);
       fetchInitialData();
     } catch (err) {
-      toast.error('Failed to duplicate campaign');
+      toast.error(apiError(err, 'Failed to duplicate campaign.'));
     }
   };
 
@@ -186,7 +182,7 @@ export default function Campaigns() {
         toast.success('Campaign deleted successfully');
         fetchInitialData();
       } catch (err) {
-        toast.error('Failed to delete campaign');
+        toast.error(apiError(err, 'Failed to delete campaign.'));
       }
     }
   };
@@ -208,7 +204,7 @@ export default function Campaigns() {
       fetchInitialData();
       if (activeTab === 'dashboard') fetchDashboard();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to assign member');
+      toast.error(apiError(err, 'Failed to assign member.'));
     }
   };
 
@@ -220,7 +216,7 @@ export default function Campaigns() {
         fetchInitialData();
         if (activeTab === 'dashboard') fetchDashboard();
       } catch (err) {
-        toast.error('Failed to remove member');
+        toast.error(apiError(err, 'Failed to remove member.'));
       }
     }
   };
@@ -304,7 +300,7 @@ export default function Campaigns() {
       setStructureModalOpen(false);
       fetchStructures();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to save structure');
+      toast.error(apiError(err, 'Failed to save the commission structure.'));
     }
   };
 
@@ -315,7 +311,7 @@ export default function Campaigns() {
       fetchStructures();
       fetchInitialData();
     } catch (err) {
-      toast.error('Failed to activate structure');
+      toast.error(apiError(err, 'Failed to activate the structure.'));
     }
   };
 
@@ -326,7 +322,7 @@ export default function Campaigns() {
         toast.success('Structure deleted');
         fetchStructures();
       } catch (err) {
-        toast.error('Failed to delete structure');
+        toast.error(apiError(err, 'Failed to delete the structure.'));
       }
     }
   };
@@ -360,7 +356,7 @@ export default function Campaigns() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4">
         <div>
-          <h2 className="text-xl font-extrabold tracking-tight text-white font-display uppercase">Campaigns & Commissions</h2>
+          <h2 className="text-xl font-extrabold tracking-tight text-brand-text font-display uppercase">Campaigns & Commissions</h2>
           <p className="text-xs text-brand-text-soft mt-1">Manage sales campaigns, SDR success tiers, dynamic slabs, and TL override rules.</p>
         </div>
         {isAdmin && (
@@ -381,7 +377,7 @@ export default function Campaigns() {
           className={`px-4 py-2 text-xs font-bold font-display border-b-2 transition-all cursor-pointer ${
             activeTab === 'overview'
               ? 'border-brand-cyan text-brand-cyan'
-              : 'border-transparent text-brand-text-soft hover:text-white'
+              : 'border-transparent text-brand-text-soft hover:text-brand-text'
           }`}
         >
           Overview & Management
@@ -391,7 +387,7 @@ export default function Campaigns() {
           className={`px-4 py-2 text-xs font-bold font-display border-b-2 transition-all cursor-pointer ${
             activeTab === 'dashboard'
               ? 'border-brand-cyan text-brand-cyan'
-              : 'border-transparent text-brand-text-soft hover:text-white'
+              : 'border-transparent text-brand-text-soft hover:text-brand-text'
           }`}
         >
           Performance Analytics
@@ -401,7 +397,7 @@ export default function Campaigns() {
           className={`px-4 py-2 text-xs font-bold font-display border-b-2 transition-all cursor-pointer ${
             activeTab === 'commission_builder'
               ? 'border-brand-cyan text-brand-cyan'
-              : 'border-transparent text-brand-text-soft hover:text-white'
+              : 'border-transparent text-brand-text-soft hover:text-brand-text'
           }`}
         >
           Commission Slab Builder
@@ -411,7 +407,7 @@ export default function Campaigns() {
           className={`px-4 py-2 text-xs font-bold font-display border-b-2 transition-all cursor-pointer ${
             activeTab === 'simulator'
               ? 'border-brand-cyan text-brand-cyan'
-              : 'border-transparent text-brand-text-soft hover:text-white'
+              : 'border-transparent text-brand-text-soft hover:text-brand-text'
           }`}
         >
           Commission Simulator
@@ -436,7 +432,7 @@ export default function Campaigns() {
                     placeholder="Search campaigns..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none focus:border-brand-blue"
+                    className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                   />
                 </div>
                 <div className="flex items-center gap-2">
@@ -444,7 +440,7 @@ export default function Campaigns() {
                   <select
                     value={statusFilter}
                     onChange={(e) => setStatusFilter(e.target.value)}
-                    className="px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none cursor-pointer"
+                    className="px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer"
                   >
                     <option value="all">All Statuses</option>
                     <option value="active">Active</option>
@@ -512,7 +508,7 @@ export default function Campaigns() {
                         </div>
 
                         <div>
-                          <h3 className="text-base font-extrabold text-white font-display group-hover:text-brand-cyan transition-colors">{camp.name}</h3>
+                          <h3 className="text-base font-extrabold text-brand-text font-display group-hover:text-brand-cyan transition-colors">{camp.name}</h3>
                           <p className="text-xs text-brand-text-soft mt-1 leading-relaxed line-clamp-2">{camp.description || 'No description provided.'}</p>
                         </div>
 
@@ -523,11 +519,11 @@ export default function Campaigns() {
                           </div>
                           <div className="flex justify-between text-brand-text-mute">
                             <span>Lead:</span>
-                            <span className="font-extrabold text-white">{teamLead ? teamLead.employee.fullName : 'None'}</span>
+                            <span className="font-extrabold text-brand-text">{teamLead ? teamLead.employee.fullName : 'None'}</span>
                           </div>
                           <div className="flex justify-between text-brand-text-mute">
                             <span>SDR Staff size:</span>
-                            <span className="font-extrabold text-white font-mono">{sdrs.length}</span>
+                            <span className="font-extrabold text-brand-text font-mono">{sdrs.length}</span>
                           </div>
                         </div>
                       </div>
@@ -552,7 +548,7 @@ export default function Campaigns() {
                         {camp.status !== 'archived' && isAdmin && (
                           <button
                             onClick={() => handleStatusToggle(camp, 'archived')}
-                            className="flex-1 py-1.5 rounded-lg bg-brand-bg-elevated border border-brand-border hover:bg-brand-bg-soft text-brand-text-mute hover:text-white text-[10px] font-bold transition-all cursor-pointer text-center"
+                            className="flex-1 py-1.5 rounded-lg bg-brand-bg-elevated border border-brand-border hover:bg-brand-bg-soft text-brand-text-mute hover:text-brand-text text-[10px] font-bold transition-all cursor-pointer text-center"
                           >
                             Archive
                           </button>
@@ -575,7 +571,7 @@ export default function Campaigns() {
                   <select
                     value={selectedCampaignId}
                     onChange={(e) => setSelectedCampaignId(e.target.value)}
-                    className="px-3.5 py-2 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none cursor-pointer font-bold"
+                    className="px-3.5 py-2 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer font-bold"
                   >
                     {campaigns.map(c => (
                       <option key={c.id} value={c.id}>{c.name}</option>
@@ -609,7 +605,7 @@ export default function Campaigns() {
                         <Zap className="w-4 h-4 text-brand-cyan" />
                       </div>
                       <p className="text-[10px] text-brand-text-soft font-bold uppercase tracking-widest font-display">Meetings Booked</p>
-                      <h3 className="text-2xl font-extrabold text-white mt-2 font-mono">{dashboardData.stats.meetingsBooked}</h3>
+                      <h3 className="text-2xl font-extrabold text-brand-text mt-2 font-mono">{dashboardData.stats.meetingsBooked}</h3>
                       <p className="text-[9px] text-brand-text-mute mt-2 font-bold">{dashboardData.stats.conversionRate}% meeting to show-up rate</p>
                     </div>
 
@@ -618,7 +614,7 @@ export default function Campaigns() {
                         <ShieldAlert className="w-4 h-4 text-brand-amber" />
                       </div>
                       <p className="text-[10px] text-brand-text-soft font-bold uppercase tracking-widest font-display">No Shows & Cancelled</p>
-                      <h3 className="text-2xl font-extrabold text-white mt-2 font-mono">
+                      <h3 className="text-2xl font-extrabold text-brand-text mt-2 font-mono">
                         {dashboardData.stats.noShows} <span className="text-xs text-brand-text-soft font-normal">No Show</span>
                         <span className="text-xs text-brand-text-soft font-normal mx-2">|</span>
                         {dashboardData.stats.cancelledMeetings} <span className="text-xs text-brand-text-soft font-normal">Cancel</span>
@@ -639,7 +635,7 @@ export default function Campaigns() {
                   {/* Leaderboard Table */}
                   <div className="p-6 rounded-2xl glass-panel border border-brand-border/40 space-y-4">
                     <div className="flex justify-between items-center pb-2 border-b border-brand-border/40">
-                      <h3 className="text-sm font-extrabold text-white uppercase font-display flex items-center gap-2">
+                      <h3 className="text-sm font-extrabold text-brand-text uppercase font-display flex items-center gap-2">
                         <Award className="w-4 h-4 text-brand-cyan" />
                         Campaign Leaderboard (SDR Rankings)
                       </h3>
@@ -665,7 +661,7 @@ export default function Campaigns() {
                             <tr key={item.employeeId} className="hover:bg-brand-bg/40 transition-colors">
                               <td className="py-3.5 px-2 font-mono font-extrabold text-brand-cyan">{idx + 1}</td>
                               <td className="py-3.5 px-2">
-                                <p className="font-bold text-white">{item.fullName}</p>
+                                <p className="font-bold text-brand-text">{item.fullName}</p>
                                 <p className="text-[9px] text-brand-text-mute mt-0.5">{item.code}</p>
                               </td>
                               <td className="py-3.5 px-2 text-center font-mono font-bold">{item.meetingsBooked}</td>
@@ -713,7 +709,7 @@ export default function Campaigns() {
                   <select
                     value={selectedCampaignId}
                     onChange={(e) => setSelectedCampaignId(e.target.value)}
-                    className="px-3.5 py-2 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none cursor-pointer font-bold"
+                    className="px-3.5 py-2 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer font-bold"
                   >
                     {campaigns.map(c => (
                       <option key={c.id} value={c.id}>{c.name}</option>
@@ -742,7 +738,7 @@ export default function Campaigns() {
                       <div className="flex justify-between items-start">
                         <div>
                           <div className="flex items-center gap-2.5">
-                            <h3 className="text-base font-extrabold text-white font-display">{struct.name}</h3>
+                            <h3 className="text-base font-extrabold text-brand-text font-display">{struct.name}</h3>
                             <span className={`px-2 py-0.5 rounded-full text-[8px] font-extrabold uppercase border ${
                               struct.status === 'active'
                                 ? 'bg-brand-green/10 text-brand-green border-brand-green/20'
@@ -788,7 +784,7 @@ export default function Campaigns() {
                           <div key={slab.id} className="p-4 rounded-xl bg-brand-bg/40 border border-brand-border flex flex-col justify-between space-y-2">
                             <div>
                               <p className="text-[9px] text-brand-text-mute font-bold uppercase tracking-wider">Tier {i + 1}</p>
-                              <h4 className="text-xs font-bold text-white mt-1">
+                              <h4 className="text-xs font-bold text-brand-text mt-1">
                                 {slab.minShowups} to {slab.maxShowups === null ? '∞' : slab.maxShowups} Showups
                               </h4>
                             </div>
@@ -822,7 +818,7 @@ export default function Campaigns() {
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Form Input panel */}
                 <div className="p-6 rounded-2xl glass-panel border border-brand-border/40 space-y-4 h-fit">
-                  <h3 className="text-sm font-extrabold text-white uppercase font-display flex items-center gap-2">
+                  <h3 className="text-sm font-extrabold text-brand-text uppercase font-display flex items-center gap-2">
                     <Percent className="w-4 h-4 text-brand-cyan" />
                     Calculator Parameters
                   </h3>
@@ -836,7 +832,7 @@ export default function Campaigns() {
                       <select
                         value={selectedCampaignId}
                         onChange={(e) => { setSelectedCampaignId(e.target.value); setSimResults(null); }}
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none cursor-pointer"
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer"
                       >
                         {campaigns.map(c => (
                           <option key={c.id} value={c.id}>{c.name}</option>
@@ -851,7 +847,7 @@ export default function Campaigns() {
                         value={simShowups}
                         onChange={(e) => { setSimShowups(e.target.value); setSimResults(null); }}
                         placeholder="e.g. 15"
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none focus:border-brand-blue font-mono font-bold"
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue font-mono font-bold"
                       />
                     </div>
 
@@ -868,7 +864,7 @@ export default function Campaigns() {
                 {/* Results panel */}
                 <div className="lg:col-span-2 p-6 rounded-2xl glass-panel border border-brand-border/40 flex flex-col justify-between space-y-4">
                   <div>
-                    <h3 className="text-sm font-extrabold text-white uppercase font-display border-b border-brand-border/40 pb-2 flex items-center gap-2">
+                    <h3 className="text-sm font-extrabold text-brand-text uppercase font-display border-b border-brand-border/40 pb-2 flex items-center gap-2">
                       <Zap className="w-4 h-4 text-brand-cyan" />
                       Calculated Payout Breakdowns
                     </h3>
@@ -877,14 +873,14 @@ export default function Campaigns() {
                       <div className="mt-4 space-y-4">
                         <div className="p-4 rounded-xl bg-brand-bg/40 border border-brand-border space-y-2">
                           <p className="text-[10px] text-brand-text-soft font-bold uppercase tracking-wider">Matched active Structure</p>
-                          <h4 className="text-sm font-bold text-white">{simResults.structureName}</h4>
+                          <h4 className="text-sm font-bold text-brand-text">{simResults.structureName}</h4>
                         </div>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                           <div className="p-4 rounded-xl bg-brand-bg/40 border border-brand-border space-y-1">
                             <p className="text-[10px] text-brand-text-soft font-bold uppercase tracking-wider">Matched Slab Range</p>
                             {simResults.slabMatched ? (
-                              <h4 className="text-xs font-bold text-white">
+                              <h4 className="text-xs font-bold text-brand-text">
                                 {simResults.slabMatched.min} to {simResults.slabMatched.max === null ? '∞' : simResults.slabMatched.max} Showups
                               </h4>
                             ) : (
@@ -906,7 +902,7 @@ export default function Campaigns() {
 
                         <div className="p-4 rounded-xl bg-brand-bg/50 border border-brand-border space-y-2">
                           <p className="text-[10px] text-brand-text-soft font-bold uppercase tracking-wider">Slab Payout Formula Explanation</p>
-                          <p className="text-xs text-white font-mono font-bold leading-relaxed">{simResults.formulaExplanation}</p>
+                          <p className="text-xs text-brand-text font-mono font-bold leading-relaxed">{simResults.formulaExplanation}</p>
                         </div>
                       </div>
                     ) : (
@@ -919,7 +915,7 @@ export default function Campaigns() {
 
                   {simResults && (
                     <div className="p-4 rounded-xl bg-gradient-to-r from-brand-blue/10 via-brand-violet/10 to-brand-cyan/10 border border-brand-cyan/20 flex justify-between items-center">
-                      <span className="text-xs font-extrabold text-white uppercase tracking-wider font-display">Total Calculated Commission</span>
+                      <span className="text-xs font-extrabold text-brand-text uppercase tracking-wider font-display">Total Calculated Commission</span>
                       <span className="text-xl font-extrabold text-brand-green font-mono">PKR {simResults.calculatedCommission.toLocaleString()}</span>
                     </div>
                   )}
@@ -936,24 +932,24 @@ export default function Campaigns() {
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setCreateCampaignOpen(false)} />
           <div className="bg-brand-bg-elevated border border-brand-border rounded-2xl p-6 w-full max-w-md shadow-glow relative z-50 text-left">
             <div className="flex justify-between items-center border-b border-brand-border pb-3 mb-4">
-              <h3 className="text-sm font-extrabold text-white uppercase font-display">Create Campaign</h3>
-              <button onClick={() => { setCreateCampaignOpen(false); setSelectedSdrIds([]); }} className="p-1 rounded text-brand-text-soft hover:text-white cursor-pointer"><X className="w-4 h-4" /></button>
+              <h3 className="text-sm font-extrabold text-brand-text uppercase font-display">Create Campaign</h3>
+              <button onClick={() => { setCreateCampaignOpen(false); setSelectedSdrIds([]); }} className="p-1 rounded text-brand-text-soft hover:text-brand-text cursor-pointer"><X className="w-4 h-4" /></button>
             </div>
             <form onSubmit={handleSubmit(handleCreateCampaign)} className="space-y-4">
               <div>
                 <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Campaign Name</label>
-                <input type="text" {...register('name', { required: true })} placeholder="e.g. US Solar Campaign" className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none focus:border-brand-blue" />
+                <input type="text" {...register('name', { required: true })} placeholder="e.g. US Solar Campaign" className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue" />
               </div>
               <div>
                 <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Description</label>
-                <textarea rows={3} {...register('description')} placeholder="Detail the campaign parameters..." className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none focus:border-brand-blue" />
+                <textarea rows={3} {...register('description')} placeholder="Detail the campaign parameters..." className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue" />
               </div>
               
               <div>
                 <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Assign Team Lead (Optional)</label>
                 <select
                   {...register('teamLeadId')}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none cursor-pointer"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer"
                 >
                   <option value="">No Lead Assigned</option>
                   {employees.map(e => (
@@ -966,7 +962,7 @@ export default function Campaigns() {
                 <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Assign SDRs (Check to Add)</label>
                 <div className="max-h-40 overflow-y-auto p-3 rounded-xl border border-brand-border bg-brand-bg/40 space-y-2">
                   {employees.map(e => (
-                    <label key={e.id} className="flex items-center gap-2 text-xs text-white cursor-pointer hover:text-brand-cyan">
+                    <label key={e.id} className="flex items-center gap-2 text-xs text-brand-text cursor-pointer hover:text-brand-cyan">
                       <input
                         type="checkbox"
                         value={e.id}
@@ -989,7 +985,7 @@ export default function Campaigns() {
 
               <div>
                 <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Internal Notes</label>
-                <input type="text" {...register('notes')} placeholder="Campaign rules overview..." className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none focus:border-brand-blue" />
+                <input type="text" {...register('notes')} placeholder="Campaign rules overview..." className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue" />
               </div>
               <button type="submit" className="w-full py-2.5 rounded-full bg-gradient-to-r from-brand-blue via-brand-violet to-brand-cyan text-brand-bg font-bold font-display text-xs cursor-pointer shadow shadow-brand-blue/15">Save Campaign</button>
             </form>
@@ -1003,21 +999,21 @@ export default function Campaigns() {
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setEditCampaignOpen(false)} />
           <div className="bg-brand-bg-elevated border border-brand-border rounded-2xl p-6 w-full max-w-md shadow-glow relative z-50 text-left">
             <div className="flex justify-between items-center border-b border-brand-border pb-3 mb-4">
-              <h3 className="text-sm font-extrabold text-white uppercase font-display">Edit Campaign Details</h3>
-              <button onClick={() => setEditCampaignOpen(false)} className="p-1 rounded text-brand-text-soft hover:text-white cursor-pointer"><X className="w-4 h-4" /></button>
+              <h3 className="text-sm font-extrabold text-brand-text uppercase font-display">Edit Campaign Details</h3>
+              <button onClick={() => setEditCampaignOpen(false)} className="p-1 rounded text-brand-text-soft hover:text-brand-text cursor-pointer"><X className="w-4 h-4" /></button>
             </div>
             <form onSubmit={handleSubmit(handleEditCampaign)} className="space-y-4">
               <div>
                 <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Campaign Name</label>
-                <input type="text" {...register('name', { required: true })} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none focus:border-brand-blue" />
+                <input type="text" {...register('name', { required: true })} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue" />
               </div>
               <div>
                 <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Description</label>
-                <textarea rows={3} {...register('description')} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none focus:border-brand-blue" />
+                <textarea rows={3} {...register('description')} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue" />
               </div>
               <div>
                 <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Internal Notes</label>
-                <input type="text" {...register('notes')} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none focus:border-brand-blue" />
+                <input type="text" {...register('notes')} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue" />
               </div>
               <button type="submit" className="w-full py-2.5 rounded-full bg-gradient-to-r from-brand-blue via-brand-violet to-brand-cyan text-brand-bg font-bold font-display text-xs cursor-pointer shadow shadow-brand-blue/15">Update Campaign</button>
             </form>
@@ -1031,8 +1027,8 @@ export default function Campaigns() {
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setAssignOpen(false)} />
           <div className="bg-brand-bg-elevated border border-brand-border rounded-2xl p-6 w-full max-w-md shadow-glow relative z-50 text-left">
             <div className="flex justify-between items-center border-b border-brand-border pb-3 mb-4">
-              <h3 className="text-sm font-extrabold text-white uppercase font-display">Assign Campaign Personnel</h3>
-              <button onClick={() => setAssignOpen(false)} className="p-1 rounded text-brand-text-soft hover:text-white cursor-pointer"><X className="w-4 h-4" /></button>
+              <h3 className="text-sm font-extrabold text-brand-text uppercase font-display">Assign Campaign Personnel</h3>
+              <button onClick={() => setAssignOpen(false)} className="p-1 rounded text-brand-text-soft hover:text-brand-text cursor-pointer"><X className="w-4 h-4" /></button>
             </div>
             <form onSubmit={handleAssignMember} className="space-y-4">
               <div>
@@ -1040,7 +1036,7 @@ export default function Campaigns() {
                 <select
                   value={assignEmployeeId}
                   onChange={(e) => setAssignEmployeeId(e.target.value)}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none cursor-pointer"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer"
                 >
                   <option value="">Choose employee...</option>
                   {employees.map(e => (
@@ -1054,7 +1050,7 @@ export default function Campaigns() {
                 <select
                   value={assignRole}
                   onChange={(e) => setAssignRole(e.target.value)}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none cursor-pointer"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer"
                 >
                   <option value="sdr">SDR (Outreach Agent)</option>
                   <option value="team_lead">Team Lead (Operational Lead)</option>
@@ -1073,8 +1069,8 @@ export default function Campaigns() {
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setStructureModalOpen(false)} />
           <div className="bg-brand-bg-elevated border border-brand-border rounded-2xl p-6 w-full max-w-3xl shadow-glow relative z-50 text-left max-h-[85vh] overflow-y-auto">
             <div className="flex justify-between items-center border-b border-brand-border pb-3 mb-6">
-              <h3 className="text-sm font-extrabold text-white uppercase font-display">Configure Commission Slabs</h3>
-              <button onClick={() => setStructureModalOpen(false)} className="p-1 rounded text-brand-text-soft hover:text-white cursor-pointer"><X className="w-4 h-4" /></button>
+              <h3 className="text-sm font-extrabold text-brand-text uppercase font-display">Configure Commission Slabs</h3>
+              <button onClick={() => setStructureModalOpen(false)} className="p-1 rounded text-brand-text-soft hover:text-brand-text cursor-pointer"><X className="w-4 h-4" /></button>
             </div>
 
             <form onSubmit={handleSaveStructure} className="space-y-6">
@@ -1085,13 +1081,13 @@ export default function Campaigns() {
                   value={structureName}
                   onChange={(e) => setStructureName(e.target.value)}
                   placeholder="e.g. Standard Tiered Showups Plan"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none focus:border-brand-blue"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                 />
               </div>
 
               <div className="space-y-4">
                 <div className="flex justify-between items-center border-b border-brand-border pb-2">
-                  <h4 className="text-xs font-bold text-white uppercase tracking-widest font-display">Slabs Configuration</h4>
+                  <h4 className="text-xs font-bold text-brand-text uppercase tracking-widest font-display">Slabs Configuration</h4>
                   <button
                     type="button"
                     onClick={handleAddSlab}
@@ -1111,7 +1107,7 @@ export default function Campaigns() {
                           value={slab.minShowups}
                           onChange={(e) => handleSlabChange(i, 'minShowups', e.target.value)}
                           placeholder="e.g. 0"
-                          className="w-full px-2.5 py-1.5 rounded bg-brand-bg border border-brand-border text-xs text-white focus:outline-none"
+                          className="w-full px-2.5 py-1.5 rounded bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none"
                         />
                       </div>
 
@@ -1122,7 +1118,7 @@ export default function Campaigns() {
                           value={slab.maxShowups}
                           onChange={(e) => handleSlabChange(i, 'maxShowups', e.target.value)}
                           placeholder="e.g. 10"
-                          className="w-full px-2.5 py-1.5 rounded bg-brand-bg border border-brand-border text-xs text-white focus:outline-none"
+                          className="w-full px-2.5 py-1.5 rounded bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none"
                         />
                       </div>
 
@@ -1133,7 +1129,7 @@ export default function Campaigns() {
                           value={slab.rate}
                           onChange={(e) => handleSlabChange(i, 'rate', e.target.value)}
                           placeholder="e.g. 3000"
-                          className="w-full px-2.5 py-1.5 rounded bg-brand-bg border border-brand-border text-xs text-white focus:outline-none font-mono"
+                          className="w-full px-2.5 py-1.5 rounded bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none font-mono"
                         />
                       </div>
 
@@ -1142,7 +1138,7 @@ export default function Campaigns() {
                         <select
                           value={slab.type}
                           onChange={(e) => handleSlabChange(i, 'type', e.target.value)}
-                          className="w-full px-2.5 py-1.5 rounded bg-brand-bg border border-brand-border text-xs text-white focus:outline-none cursor-pointer"
+                          className="w-full px-2.5 py-1.5 rounded bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer"
                         >
                           <option value="per_showup">Per Show-up</option>
                           <option value="fixed_monthly">Fixed Monthly Payout</option>

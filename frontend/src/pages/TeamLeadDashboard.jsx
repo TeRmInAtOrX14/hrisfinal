@@ -1,19 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
+import { Link } from 'react-router-dom';
 import {
   Users,
-  Briefcase,
-  CalendarCheck,
-  AlertCircle,
   Clock,
   TrendingUp,
   Award,
   DollarSign,
   UserCheck,
-  FileSpreadsheet,
-  CheckCircle,
-  HelpCircle,
-  ArrowRight
+  Info,
 } from 'lucide-react';
 import {
   BarChart,
@@ -28,420 +23,467 @@ import {
   Cell,
   Legend,
   LineChart,
-  Line
+  Line,
 } from 'recharts';
-import api from '../utils/api';
 import toast from 'react-hot-toast';
+
+import api, { session, apiError } from '../utils/api';
 import { useTheme } from '../utils/themeContext';
+import { money, percent, todayInput } from '../utils/format';
 
 const COLORS = ['#3e6cf6', '#8b5cf6', '#22d3ee', '#34d399', '#f5b942', '#ef4444'];
 
+/**
+ * Team Lead dashboard.
+ *
+ * Previously this picked `campaigns.find(c => c.status === 'active')` — the
+ * first active campaign in the whole company, which the unrestricted
+ * /campaigns endpoint happily returned. A lead could end up staring at another
+ * team's numbers. The API now scopes /campaigns to the caller's memberships, and
+ * this picks the campaign the user actually leads.
+ *
+ * The "Team Attendance Rate" tile also used to fall back to a literal 90% when
+ * there were no records. An empty state is shown instead of an invented number.
+ */
 export default function TeamLeadDashboard() {
-  const { theme, isDark } = useTheme();
+  const { isDark } = useTheme();
 
-  const strokeColor = isDark ? '#6b7287' : '#94a3b8';
-  const gridStroke = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(15, 23, 42, 0.08)';
-  const tooltipBg = isDark ? '#0d101c' : '#ffffff';
-  const tooltipBorder = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15, 23, 42, 0.08)';
-  const tooltipColor = isDark ? '#f4f6fb' : '#0f172a';
-
-  const [teamMembers, setTeamMembers] = useState([]);
-  const [campaigns, setCampaigns] = useState([]);
-  const [attendance, setAttendance] = useState([]);
-  const [campaignDashboard, setCampaignDashboard] = useState(null);
-  const [leaves, setLeaves] = useState([]);
-  const [halfdays, setHalfdays] = useState([]);
-  const [wfh, setWfh] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  const currentUser = JSON.parse(localStorage.getItem('user')) || {};
-
-  const fetchData = async () => {
-    try {
-      setLoading(true);
-
-      const today = new Date();
-      const currentMonth = today.getMonth() + 1;
-      const currentYear = today.getFullYear();
-      const tenDaysAgo = new Date();
-      tenDaysAgo.setDate(today.getDate() - 10);
-      const tenDaysAgoStr = tenDaysAgo.toISOString().split('T')[0];
-      const todayStr = today.toISOString().split('T')[0];
-
-      // Fetch ALL data in parallel — employees, campaigns, attendance, and requests
-      const [empRes, campRes, attRes, leaveRes, halfdayRes, wfhRes] = await Promise.all([
-        api.get('/employees'),
-        api.get('/campaigns'),
-        api.get(`/attendance?startDate=${tenDaysAgoStr}&endDate=${todayStr}`),
-        api.get('/requests/leave?status=pending'),
-        api.get('/requests/halfday?status=pending'),
-        api.get('/requests/wfh?status=pending')
-      ]);
-
-      setTeamMembers(empRes.data);
-      setCampaigns(campRes.data);
-      setAttendance(attRes.data);
-      setLeaves(leaveRes.data);
-      setHalfdays(halfdayRes.data);
-      setWfh(wfhRes.data);
-
-      // Fetch campaign dashboard (depends on knowing which campaign is active)
-      const activeCampaign = campRes.data.find(c => c.status === 'active');
-      if (activeCampaign) {
-        const dashRes = await api.get(`/campaigns/${activeCampaign.id}/dashboard?month=${currentMonth}&year=${currentYear}`);
-        setCampaignDashboard(dashRes.data);
-      }
-
-    } catch (err) {
-      toast.error('Failed to load Team Lead metrics');
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
+  const axisStroke = isDark ? '#6b7287' : '#94a3b8';
+  const gridStroke = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.08)';
+  const tooltipStyle = {
+    backgroundColor: isDark ? '#0d101c' : '#ffffff',
+    borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.10)',
+    color: isDark ? '#f4f6fb' : '#0f172a',
+    borderRadius: 12,
+    fontSize: 12,
   };
 
+  const [attendance, setAttendance] = useState([]);
+  const [dashboard, setDashboard] = useState(null);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [loading, setLoading] = useState(true);
+
+  const currentUser = session.user;
+
   useEffect(() => {
-    fetchData();
-  }, []);
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setLoading(true);
+
+        const today = new Date();
+        const month = today.getMonth() + 1;
+        const year = today.getFullYear();
+        const tenDaysAgo = new Date();
+        tenDaysAgo.setDate(today.getDate() - 10);
+
+        const [campRes, attRes, leaveRes, halfRes, wfhRes] = await Promise.all([
+          api.get('/campaigns'),
+          api.get(
+            `/attendance?startDate=${tenDaysAgo.toISOString().slice(0, 10)}&endDate=${todayInput()}`
+          ),
+          api.get('/requests/leave?status=pending'),
+          api.get('/requests/halfday?status=pending'),
+          api.get('/requests/wfh?status=pending'),
+        ]);
+
+        if (cancelled) return;
+
+        setAttendance(attRes.data);
+        setPendingCount(leaveRes.data.length + halfRes.data.length + wfhRes.data.length);
+
+        // The campaign this user actually leads, not just any active one.
+        const myEmployeeId = currentUser?.employee?.id;
+        const led = campRes.data.find((c) =>
+          c.members?.some(
+            (m) => m.employeeId === myEmployeeId && m.role === 'team_lead' && m.status === 'active'
+          )
+        );
+
+        if (led) {
+          const dash = await api.get(`/campaigns/${led.id}/dashboard?month=${month}&year=${year}`);
+          if (!cancelled) setDashboard(dash.data);
+        }
+      } catch (err) {
+        if (!cancelled) toast.error(apiError(err, 'Failed to load team metrics.'));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.employee?.id]);
 
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center min-h-[50vh]">
         <div className="flex flex-col items-center gap-3">
           <Clock className="w-8 h-8 animate-spin text-brand-cyan" />
-          <p className="text-brand-text-soft text-sm">Aggregating team performance statistics...</p>
+          <p className="text-brand-text-soft text-sm">Loading team performance…</p>
         </div>
       </div>
     );
   }
 
-  // Calculations
-  const activeCampaign = campaigns.find(c => c.status === 'active');
-  const teamName = activeCampaign?.name || 'No Active Campaign';
-  
-  const sdrs = teamMembers.filter(e => e.user?.role === 'SDR');
-  const totalSdrs = sdrs.length;
+  if (!dashboard) {
+    return (
+      <div className="p-10 text-center border border-dashed border-brand-border rounded-2xl">
+        <Users className="w-7 h-7 text-brand-text-mute mx-auto mb-3" />
+        <p className="text-sm text-brand-text-soft">You are not currently leading a campaign.</p>
+        <p className="text-xs text-brand-text-mute mt-2">
+          Ask an administrator to assign you as team lead on a campaign.
+        </p>
+      </div>
+    );
+  }
 
-  // Today's attendance
-  const todayStr = new Date().toISOString().split('T')[0];
-  const todayAttendance = attendance.filter(a => new Date(a.date).toISOString().split('T')[0] === todayStr);
+  const { campaign, stats, leaderboard } = dashboard;
 
-  const presentTodayCount = todayAttendance.filter(a => a.status === 'present' || a.status === 'half_day').length;
-  const absentTodayCount = Math.max(0, totalSdrs - presentTodayCount);
-  const lateTodayCount = todayAttendance.filter(a => a.late > 0).length;
+  const todayStr = todayInput();
+  const todayAttendance = attendance.filter(
+    (a) => new Date(a.date).toISOString().slice(0, 10) === todayStr
+  );
 
-  const monthlyShowups = campaignDashboard?.stats?.showups || 0;
-  const meetingsBooked = campaignDashboard?.stats?.meetingsBooked || 0;
-  const totalTeamCommission = campaignDashboard?.stats?.commissionPaid || 0;
+  const sdrIds = new Set(leaderboard.map((l) => l.employeeId));
+  const teamAttendanceToday = todayAttendance.filter((a) => sdrIds.has(a.employeeId));
 
-  // Requests count
-  const pendingLeavesCount = leaves.length;
-  const pendingHalfdaysCount = halfdays.length;
-  const pendingWfhCount = wfh.length;
+  const presentToday = teamAttendanceToday.filter((a) =>
+    ['present', 'half_day', 'wfh'].includes(a.status)
+  ).length;
+  const onLeaveToday = teamAttendanceToday.filter((a) => a.status === 'leave').length;
+  const teamSize = leaderboard.length;
+  const unaccountedToday = Math.max(0, teamSize - presentToday - onLeaveToday);
 
-  // Leaderboard statistics
-  const leaderboard = campaignDashboard?.leaderboard || [];
-  const topPerformer = leaderboard[0]?.fullName || 'None';
-  
-  // Averages
-  const averageShowupsPerSdr = totalSdrs > 0 ? parseFloat((monthlyShowups / totalSdrs).toFixed(1)) : 0;
-  
-  // Calculate average attendance rate of team members
-  const attendanceRate = totalSdrs > 0 && attendance.length > 0
-    ? parseFloat(((attendance.filter(a => a.status === 'present' || a.status === 'half_day').length / attendance.length) * 100).toFixed(1))
-    : 90;
+  const teamAttendance = attendance.filter((a) => sdrIds.has(a.employeeId));
+  const workedRecords = teamAttendance.filter((a) =>
+    ['present', 'half_day', 'wfh'].includes(a.status)
+  ).length;
+  const attendanceRate = teamAttendance.length > 0 ? (workedRecords / teamAttendance.length) * 100 : null;
 
-  // Target Progress (Assume overall team target is 100 show-ups)
-  const teamTarget = 100;
-  const progressPercent = Math.min(100, (monthlyShowups / teamTarget) * 100);
+  const averageShowups = teamSize > 0 ? stats.showups / teamSize : 0;
+  const target = campaign.monthlyShowupTarget || 0;
+  const progress = target > 0 ? Math.min(100, (stats.showups / target) * 100) : 0;
 
-  // ---------------------------------------------------------------------------
-  // Charts Formatting
-  // ---------------------------------------------------------------------------
-  // 1. Show-ups by Team Member
-  const showupsByMemberData = leaderboard.map(sdr => ({
+  const showupsByMember = leaderboard.map((sdr) => ({
     name: sdr.fullName.split(' ')[0],
     'Show-ups': sdr.showups,
-    'Meetings Booked': sdr.meetingsBooked
+    'Meetings Booked': sdr.meetingsBooked,
   }));
 
-  // 2. Attendance Trend Data
-  const dailyAttendanceMap = {};
-  attendance.forEach(log => {
-    const dStr = new Date(log.date).toISOString().split('T')[0];
-    if (!dailyAttendanceMap[dStr]) {
-      dailyAttendanceMap[dStr] = { present: 0, total: 0 };
-    }
-    dailyAttendanceMap[dStr].total++;
-    if (log.status === 'present' || log.status === 'half_day') {
-      dailyAttendanceMap[dStr].present++;
-    }
-  });
+  const byDay = new Map();
+  for (const log of teamAttendance) {
+    const key = new Date(log.date).toISOString().slice(0, 10);
+    if (!byDay.has(key)) byDay.set(key, { present: 0, total: 0 });
+    const b = byDay.get(key);
+    b.total++;
+    if (['present', 'half_day', 'wfh'].includes(log.status)) b.present++;
+  }
+  const attendanceTrend = [...byDay.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, m]) => ({
+      date: new Date(date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }),
+      Rate: Number(((m.present / (m.total || 1)) * 100).toFixed(0)),
+    }));
 
-  const attendanceTrendData = Object.keys(dailyAttendanceMap).sort().map(dStr => {
-    const d = new Date(dStr);
-    const m = dailyAttendanceMap[dStr];
-    return {
-      date: `${d.getMonth() + 1}/${d.getDate()}`,
-      Rate: parseFloat(((m.present / (m.total || 1)) * 100).toFixed(0))
-    };
-  });
-
-  // 3. Commission Distribution
-  const commissionDistributionData = leaderboard.map(sdr => ({
-    name: sdr.fullName.split(' ')[0],
-    value: sdr.commissionEarned
-  })).filter(d => d.value > 0);
+  const commissionShares = leaderboard
+    .map((sdr) => ({ name: sdr.fullName.split(' ')[0], value: sdr.commissionEarned }))
+    .filter((d) => d.value > 0);
 
   return (
-    <motion.div
-      variants={{ hidden: { opacity: 0 }, show: { opacity: 1, transition: { staggerChildren: 0.1 } } }}
-      initial="hidden"
-      animate="show"
-      className="space-y-6 text-left"
-    >
-      {/* Top Header Banner */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-6 rounded-2xl glass-panel relative overflow-hidden border border-brand-border/40">
-        <div className="z-10">
-          <h2 className="text-2xl font-extrabold text-white font-display uppercase tracking-tight flex items-center gap-2">
-            <Users className="w-6 h-6 text-brand-cyan" />
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6 text-left">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-6 rounded-2xl glass-panel border border-brand-border/40">
+        <div className="min-w-0">
+          <h2 className="text-2xl font-extrabold text-brand-text font-display uppercase tracking-tight flex items-center gap-2">
+            <Users className="w-6 h-6 text-brand-cyan shrink-0" />
             Team Lead Hub
           </h2>
-          <p className="text-xs text-brand-text-soft mt-1">Management center for active outreach SDR campaigns.</p>
+          <p className="text-xs text-brand-text-soft mt-1">
+            Managing {teamSize} SDR{teamSize === 1 ? '' : 's'}
+          </p>
         </div>
-        <div className="z-10 text-right">
-          <span className="text-[9px] font-bold text-brand-text-mute uppercase tracking-widest block">Campaign Assigned</span>
-          <span className="text-sm font-extrabold text-white uppercase font-display bg-brand-cyan/15 border border-brand-cyan/30 px-3.5 py-1 rounded-full mt-1 inline-block">
-            {teamName}
+        <div className="text-right shrink-0">
+          <span className="text-[9px] font-bold text-brand-text-mute uppercase tracking-widest block">
+            Campaign
+          </span>
+          <span className="text-sm font-extrabold text-brand-text uppercase font-display bg-brand-cyan/10 border border-brand-cyan/25 px-3.5 py-1 rounded-full mt-1 inline-block">
+            {campaign.name}
           </span>
         </div>
-        <div className="absolute inset-0 bg-gradient-to-r from-brand-blue/5 via-transparent to-brand-cyan/5 z-0" />
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-        {/* Total SDRs */}
-        <div className="p-4 rounded-xl glass-panel hover-glow-blue flex flex-col justify-between">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="p-4 rounded-xl glass-panel hover-glow-blue">
           <div className="flex items-center justify-between text-brand-text-soft mb-2">
-            <span className="text-[9px] font-bold uppercase tracking-wider">Total SDRs</span>
-            <Users className="w-4.5 h-4.5 text-brand-blue" />
+            <span className="text-[9px] font-bold uppercase tracking-wider">Team Size</span>
+            <Users className="w-4 h-4 text-brand-blue" />
           </div>
-          <p className="text-2xl font-extrabold text-white font-display">{totalSdrs}</p>
-          <span className="text-[8px] text-brand-text-mute mt-1 font-mono uppercase">Assigned Team Size</span>
+          <p className="text-2xl font-extrabold text-brand-text font-display tabular-nums">{teamSize}</p>
+          <span className="text-[8px] text-brand-text-mute mt-1 font-mono uppercase block">Active SDRs</span>
         </div>
 
-        {/* Present Today */}
-        <div className="p-4 rounded-xl glass-panel hover-glow-green flex flex-col justify-between">
+        <div className="p-4 rounded-xl glass-panel hover-glow-green">
           <div className="flex items-center justify-between text-brand-text-soft mb-2">
             <span className="text-[9px] font-bold uppercase tracking-wider">Present Today</span>
-            <UserCheck className="w-4.5 h-4.5 text-brand-green" />
+            <UserCheck className="w-4 h-4 text-brand-green" />
           </div>
-          <p className="text-2xl font-extrabold text-brand-green font-display">{presentTodayCount}</p>
-          <span className="text-[8px] text-brand-text-mute mt-1 font-mono uppercase">{absentTodayCount} SDRs Absent</span>
+          <p className="text-2xl font-extrabold text-brand-green font-display tabular-nums">{presentToday}</p>
+          <span className="text-[8px] text-brand-text-mute mt-1 font-mono uppercase block">
+            {onLeaveToday} on leave · {unaccountedToday} unaccounted
+          </span>
         </div>
 
-        {/* Monthly Show-ups */}
-        <div className="p-4 rounded-xl glass-panel hover-glow-cyan flex flex-col justify-between">
+        <div className="p-4 rounded-xl glass-panel hover-glow-cyan">
           <div className="flex items-center justify-between text-brand-text-soft mb-2">
             <span className="text-[9px] font-bold uppercase tracking-wider">Monthly Show-ups</span>
-            <TrendingUp className="w-4.5 h-4.5 text-brand-cyan" />
+            <TrendingUp className="w-4 h-4 text-brand-cyan" />
           </div>
-          <p className="text-2xl font-extrabold text-white font-display">{monthlyShowups}</p>
-          <span className="text-[8px] text-brand-text-mute mt-1 font-mono uppercase">{meetingsBooked} Booked</span>
+          <p className="text-2xl font-extrabold text-brand-text font-display tabular-nums">{stats.showups}</p>
+          <span className="text-[8px] text-brand-text-mute mt-1 font-mono uppercase block">
+            {stats.meetingsBooked} booked · {percent(stats.conversionRate)} conversion
+          </span>
         </div>
 
-        {/* Team Commission */}
-        <div className="p-4 rounded-xl glass-panel hover-glow-violet flex flex-col justify-between">
+        <div className="p-4 rounded-xl glass-panel hover-glow-violet">
           <div className="flex items-center justify-between text-brand-text-soft mb-2">
-            <span className="text-[9px] font-bold uppercase tracking-wider">Team Commission</span>
-            <DollarSign className="w-4.5 h-4.5 text-brand-violet" />
+            <span className="text-[9px] font-bold uppercase tracking-wider">Your Commission</span>
+            <DollarSign className="w-4 h-4 text-brand-violet" />
           </div>
-          <p className="text-2xl font-extrabold text-white font-display">PKR {Math.round(totalTeamCommission).toLocaleString()}</p>
-          <span className="text-[8px] text-brand-text-mute mt-1 font-mono uppercase">Payout this Month</span>
+          <p className="text-xl font-extrabold text-brand-text font-display tabular-nums">
+            {money(stats.teamLeadCommission)}
+          </p>
+          <span className="text-[8px] text-brand-text-mute mt-1 font-mono uppercase block">
+            Team payout {money(stats.sdrCommission)}
+          </span>
         </div>
       </div>
 
-      {/* Target Progress Bar */}
-      <div className="p-6 rounded-2xl glass-panel border border-brand-border/40">
-        <div className="flex justify-between items-center text-xs font-bold text-brand-text-soft mb-3">
-          <span className="uppercase tracking-wider">Team Campaign Progress Target</span>
-          <span className="font-mono text-white">{monthlyShowups} / {teamTarget} ({progressPercent.toFixed(0)}%)</span>
+      {/* How the lead's own commission was reached — the dashboard and payroll
+          used to compute this two different ways and silently disagree. */}
+      {stats.teamLeadCommissionBasis && (
+        <div className="flex items-start gap-2.5 p-3.5 rounded-xl border border-brand-border bg-brand-bg-soft/40 text-[11px] text-brand-text-soft">
+          <Info className="w-3.5 h-3.5 text-brand-blue shrink-0 mt-0.5" />
+          <span>{stats.teamLeadCommissionBasis}</span>
         </div>
-        <div className="w-full bg-brand-bg-soft rounded-full h-3 border border-brand-border overflow-hidden">
-          <div
-            className="brandigade-gradient h-full rounded-full transition-all duration-500 shadow-glow"
-            style={{ width: `${progressPercent}%` }}
-          />
-        </div>
-      </div>
+      )}
 
-      {/* Split Analytics & Visualizations */}
+      {target > 0 && (
+        <div className="p-6 rounded-2xl glass-panel border border-brand-border/40">
+          <div className="flex justify-between items-center text-xs font-bold text-brand-text-soft mb-3">
+            <span className="uppercase tracking-wider">Campaign target progress</span>
+            <span className="font-mono text-brand-text tabular-nums">
+              {stats.showups} / {target} ({progress.toFixed(0)}%)
+            </span>
+          </div>
+          <div className="w-full bg-brand-bg-soft rounded-full h-3 border border-brand-border overflow-hidden">
+            <div
+              className="brandigade-gradient h-full rounded-full transition-all duration-500"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        {/* Left Column: Recharts visual trends */}
         <div className="lg:col-span-2 space-y-6">
-          {/* Show-ups by Team Member */}
           <div className="p-6 rounded-2xl glass-panel space-y-4">
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider font-display">Show-ups by Team Member</h3>
+            <h3 className="text-xs font-bold text-brand-text uppercase tracking-wider font-display">
+              Show-ups by team member
+            </h3>
             <div className="h-64 w-full">
-              {showupsByMemberData.length > 0 ? (
+              {showupsByMember.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={showupsByMemberData}>
+                  <BarChart data={showupsByMember}>
                     <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
-                    <XAxis dataKey="name" stroke={strokeColor} fontSize={10} tickLine={false} />
-                    <YAxis stroke={strokeColor} fontSize={10} tickLine={false} />
-                    <Tooltip contentStyle={{ backgroundColor: tooltipBg, borderColor: tooltipBorder, color: tooltipColor, borderRadius: 12 }} />
-                    <Legend verticalAlign="top" height={36} />
+                    <XAxis dataKey="name" stroke={axisStroke} fontSize={10} tickLine={false} />
+                    <YAxis stroke={axisStroke} fontSize={10} tickLine={false} allowDecimals={false} />
+                    <Tooltip contentStyle={tooltipStyle} cursor={{ fill: gridStroke }} />
+                    <Legend verticalAlign="top" height={30} wrapperStyle={{ fontSize: 11 }} />
                     <Bar dataKey="Meetings Booked" fill="#3e6cf6" radius={[4, 4, 0, 0]} />
                     <Bar dataKey="Show-ups" fill="#34d399" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               ) : (
-                <p className="text-xs text-brand-text-mute italic py-12 text-center">No showups registered for this campaign yet</p>
+                <p className="text-xs text-brand-text-mute italic py-20 text-center">
+                  No performance logged for this campaign yet.
+                </p>
               )}
             </div>
           </div>
 
-          {/* Attendance Trend Line */}
           <div className="p-6 rounded-2xl glass-panel space-y-4">
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider font-display">Daily Attendance Trend Rate</h3>
-            <div className="h-64 w-full">
-              {attendanceTrendData.length > 0 ? (
+            <h3 className="text-xs font-bold text-brand-text uppercase tracking-wider font-display">
+              Daily attendance rate
+            </h3>
+            <div className="h-56 w-full">
+              {attendanceTrend.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={attendanceTrendData}>
+                  <LineChart data={attendanceTrend}>
                     <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
-                    <XAxis dataKey="date" stroke={strokeColor} fontSize={10} tickLine={false} />
-                    <YAxis stroke={strokeColor} fontSize={10} tickLine={false} />
-                    <Tooltip contentStyle={{ backgroundColor: tooltipBg, borderColor: tooltipBorder, color: tooltipColor, borderRadius: 12 }} />
-                    <Line type="monotone" dataKey="Rate" name="Attendance Rate %" stroke="#22d3ee" strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                    <XAxis dataKey="date" stroke={axisStroke} fontSize={10} tickLine={false} />
+                    <YAxis stroke={axisStroke} fontSize={10} tickLine={false} domain={[0, 100]} />
+                    <Tooltip contentStyle={tooltipStyle} formatter={(v) => [`${v}%`, 'Attendance']} />
+                    <Line
+                      type="monotone"
+                      dataKey="Rate"
+                      stroke="#22d3ee"
+                      strokeWidth={2.5}
+                      dot={{ r: 3 }}
+                      activeDot={{ r: 5 }}
+                    />
                   </LineChart>
                 </ResponsiveContainer>
               ) : (
-                <p className="text-xs text-brand-text-mute italic py-12 text-center">No attendance logs logged yet</p>
+                <p className="text-xs text-brand-text-mute italic py-16 text-center">
+                  No attendance logged for your team yet.
+                </p>
               )}
             </div>
           </div>
         </div>
 
-        {/* Right Column: Summaries & Leaderboard distributions */}
         <div className="space-y-6">
-          {/* Team Analytics Insight */}
           <div className="p-6 rounded-2xl glass-panel space-y-4 text-xs">
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider font-display font-bold">Team Performance Insights</h3>
-            
-            <div className="space-y-3.5">
+            <h3 className="text-xs font-bold text-brand-text uppercase tracking-wider font-display">
+              Team insights
+            </h3>
+            <dl className="space-y-3.5">
+              <div className="flex justify-between items-center gap-3">
+                <dt className="text-brand-text-soft">Top performer</dt>
+                <dd className="font-bold text-brand-text uppercase tracking-wide flex items-center gap-1.5 min-w-0">
+                  <Award className="w-3.5 h-3.5 text-brand-cyan shrink-0" />
+                  <span className="truncate">{leaderboard[0]?.fullName || '—'}</span>
+                </dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-brand-text-soft">Team attendance rate</dt>
+                <dd className="font-mono font-bold text-brand-green tabular-nums">
+                  {attendanceRate === null ? '—' : percent(attendanceRate)}
+                </dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-brand-text-soft">Average show-ups / SDR</dt>
+                <dd className="font-mono font-bold text-brand-cyan tabular-nums">
+                  {averageShowups.toFixed(1)}
+                </dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-brand-text-soft">No-shows this month</dt>
+                <dd className="font-mono font-bold text-brand-amber tabular-nums">{stats.noShows}</dd>
+              </div>
               <div className="flex justify-between items-center">
-                <span className="text-brand-text-soft">Top Performer of Month:</span>
-                <span className="font-bold text-white uppercase tracking-wide flex items-center gap-1">
-                  <Award className="w-3.5 h-3.5 text-brand-cyan" />
-                  {topPerformer}
-                </span>
+                <dt className="text-brand-text-soft">Pending team requests</dt>
+                <dd className="font-mono font-bold text-brand-amber tabular-nums">
+                  <Link to="/dashboard/requests" className="hover:underline">
+                    {pendingCount}
+                  </Link>
+                </dd>
               </div>
-              <div className="flex justify-between">
-                <span className="text-brand-text-soft">Team Attendance Rate:</span>
-                <span className="font-mono font-bold text-brand-green">{attendanceRate.toFixed(1)}%</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-brand-text-soft">Average Show-ups per SDR:</span>
-                <span className="font-mono font-bold text-brand-cyan">{averageShowupsPerSdr} show-ups</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-brand-text-soft">Pending Team Requests:</span>
-                <span className="font-mono font-bold text-brand-amber">
-                  {pendingLeavesCount + pendingHalfdaysCount + pendingWfhCount} requests
-                </span>
-              </div>
-            </div>
+            </dl>
           </div>
 
-          {/* Commission distribution pie chart */}
           <div className="p-6 rounded-2xl glass-panel space-y-4">
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider font-display">Commission Payout Shares</h3>
+            <h3 className="text-xs font-bold text-brand-text uppercase tracking-wider font-display">
+              Commission shares
+            </h3>
             <div className="h-48 w-full flex justify-center items-center">
-              {commissionDistributionData.length > 0 ? (
+              {commissionShares.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
-                      data={commissionDistributionData}
+                      data={commissionShares}
                       cx="50%"
                       cy="50%"
                       labelLine={false}
-                      label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                      label={({ name, percent: p }) => `${name} ${(p * 100).toFixed(0)}%`}
                       outerRadius={60}
-                      fill="#8884d8"
                       dataKey="value"
+                      style={{ fontSize: 10 }}
                     >
-                      {commissionDistributionData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                      {commissionShares.map((entry, index) => (
+                        <Cell key={entry.name} fill={COLORS[index % COLORS.length]} />
                       ))}
                     </Pie>
-                    <Tooltip contentStyle={{ backgroundColor: tooltipBg, borderColor: tooltipBorder, color: tooltipColor, borderRadius: 12 }} />
+                    <Tooltip contentStyle={tooltipStyle} formatter={(v) => money(v)} />
                   </PieChart>
                 </ResponsiveContainer>
               ) : (
-                <p className="text-xs text-brand-text-mute italic">No commissions payout recorded</p>
+                <p className="text-xs text-brand-text-mute italic">No commission earned yet.</p>
               )}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Team Roster Table */}
       <div className="p-6 rounded-2xl glass-panel border border-brand-border/40 space-y-4">
-        <h3 className="text-xs font-bold text-white uppercase tracking-wider font-display">Active Team Members</h3>
-        
+        <h3 className="text-xs font-bold text-brand-text uppercase tracking-wider font-display">
+          Team roster
+        </h3>
+
         <div className="overflow-x-auto">
           <table className="w-full text-xs text-left">
             <thead>
               <tr className="border-b border-brand-border bg-brand-bg-elevated/40 text-[9px] uppercase font-extrabold tracking-widest text-brand-text-soft">
-                <th className="py-3 px-4">Name</th>
-                <th className="py-3 px-4">Role</th>
-                <th className="py-3 px-4">Today's Attendance</th>
-                <th className="py-3 px-4 text-center">Meetings Booked</th>
-                <th className="py-3 px-4 text-center">Monthly Show-ups</th>
-                <th className="py-3 px-4 text-right">Commissions</th>
+                <th scope="col" className="py-3 px-4">Name</th>
+                <th scope="col" className="py-3 px-4">Today</th>
+                <th scope="col" className="py-3 px-4 text-center">Booked</th>
+                <th scope="col" className="py-3 px-4 text-center">Show-ups</th>
+                <th scope="col" className="py-3 px-4 text-center">No-shows</th>
+                <th scope="col" className="py-3 px-4 text-right">Commission</th>
               </tr>
             </thead>
             <tbody>
-              {sdrs.map(sdr => {
-                const attLog = todayAttendance.find(a => a.employeeId === sdr.id);
-                const perf = leaderboard.find(l => l.employeeId === sdr.id);
+              {leaderboard.map((sdr) => {
+                const log = todayAttendance.find((a) => a.employeeId === sdr.employeeId);
+                const status = log?.status;
 
-                let statusColor = 'text-brand-text-mute border-brand-border bg-brand-border/10';
-                let statusLabel = 'Absent';
-                if (attLog) {
-                  if (attLog.status === 'present') {
-                    statusColor = 'text-brand-green border-brand-green/20 bg-brand-green/5';
-                    statusLabel = 'Present';
-                  } else if (attLog.status === 'half_day') {
-                    statusColor = 'text-brand-amber border-brand-amber/20 bg-brand-amber/5';
-                    statusLabel = 'Half Day';
-                  } else if (attLog.status === 'wfh') {
-                    statusColor = 'text-brand-blue border-brand-blue/20 bg-brand-blue/5';
-                    statusLabel = 'WFH';
-                  }
-                }
+                const badge =
+                  status === 'present'
+                    ? ['Present', 'text-brand-green border-brand-green/25 bg-brand-green/10']
+                    : status === 'half_day'
+                    ? ['Half day', 'text-brand-amber border-brand-amber/25 bg-brand-amber/10']
+                    : status === 'wfh'
+                    ? ['WFH', 'text-brand-blue border-brand-blue/25 bg-brand-blue/10']
+                    : status === 'leave'
+                    ? ['Leave', 'text-brand-violet border-brand-violet/25 bg-brand-violet/10']
+                    : ['No record', 'text-brand-text-mute border-brand-border bg-brand-bg-elevated'];
 
                 return (
-                  <tr key={sdr.id} className="border-b border-brand-border/30 hover:bg-brand-bg-elevated/20 transition-colors">
-                    <td className="py-3 px-4 font-bold text-white">{sdr.fullName}</td>
-                    <td className="py-3 px-4 font-mono text-[10px] text-brand-text-soft">{sdr.designation}</td>
+                  <tr
+                    key={sdr.employeeId}
+                    className="border-b border-brand-border/30 hover:bg-brand-bg-elevated/20 transition-colors"
+                  >
+                    <td className="py-3 px-4 font-bold text-brand-text">{sdr.fullName}</td>
                     <td className="py-3 px-4">
-                      <span className={`px-2.5 py-0.5 rounded-full border text-[8px] font-bold uppercase tracking-widest ${statusColor}`}>
-                        {statusLabel}
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full border text-[8px] font-bold uppercase tracking-widest ${badge[1]}`}
+                      >
+                        {badge[0]}
                       </span>
                     </td>
-                    <td className="py-3 px-4 text-center font-mono font-bold text-white">{perf?.meetingsBooked || 0}</td>
-                    <td className="py-3 px-4 text-center font-mono font-bold text-brand-green">{perf?.showups || 0}</td>
-                    <td className="py-3 px-4 text-right font-mono font-bold text-white">
-                      PKR {Math.round(perf?.commissionEarned || 0).toLocaleString()}
+                    <td className="py-3 px-4 text-center font-mono text-brand-text tabular-nums">
+                      {sdr.meetingsBooked}
+                    </td>
+                    <td className="py-3 px-4 text-center font-mono font-bold text-brand-green tabular-nums">
+                      {sdr.showups}
+                    </td>
+                    <td className="py-3 px-4 text-center font-mono text-brand-amber tabular-nums">
+                      {sdr.noShows}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono font-bold text-brand-text tabular-nums">
+                      {money(sdr.commissionEarned)}
                     </td>
                   </tr>
                 );
               })}
-              {sdrs.length === 0 && (
+
+              {leaderboard.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-brand-text-mute italic">No SDR outreach employees assigned to your team</td>
+                  <td colSpan={6} className="py-8 text-center text-brand-text-mute italic">
+                    No SDRs assigned to your campaign yet.
+                  </td>
                 </tr>
               )}
             </tbody>

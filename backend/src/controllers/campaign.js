@@ -1,59 +1,66 @@
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../lib/prisma');
 const { logAudit } = require('../utils/audit');
+const { isAdmin, visibleCampaignIds } = require('../utils/scope');
+const {
+  calculateSlabCommission,
+  describeSlabCommission,
+  matchSlab,
+  calculateTeamLeadCommission,
+  describeTeamLeadCommission,
+} = require('../utils/commission');
 
-const prisma = new PrismaClient();
+/**
+ * Campaigns, membership and commission structures.
+ *
+ * Two classes of problem are fixed here:
+ *
+ *  - Read access. Every campaign endpoint was `requireAuth` only, so any SDR
+ *    could list all campaigns with their members and full commission slab
+ *    tables, and open any other team's dashboard. Reads are now scoped to the
+ *    campaigns the caller belongs to.
+ *
+ *  - Role clobbering. assignMember/unassignMember/toggleMemberStatus rewrote
+ *    User.role from the campaign role, so adding an Admin to a campaign demoted
+ *    them to 'Team Lead' and removing them demoted them to 'Employee' — an
+ *    admin could lock themselves out of the admin UI by tidying up a campaign.
+ *    Campaign membership no longer touches the account role at all; the role is
+ *    managed on the employee record.
+ */
 
-// Helper to validate commission slabs
-function validateSlabs(slabs) {
-  for (let i = 0; i < slabs.length; i++) {
-    const s1 = slabs[i];
-    const min1 = parseInt(s1.minShowups) || 0;
-    const max1 = s1.maxShowups !== null && s1.maxShowups !== undefined ? parseInt(s1.maxShowups) : null;
-    const rate1 = parseFloat(s1.rate) || 0;
+const MEMBER_INCLUDE = {
+  members: {
+    where: { status: 'active' },
+    include: {
+      employee: { select: { id: true, fullName: true, employeeCode: true, designation: true } },
+    },
+  },
+};
 
-    if (min1 < 0 || (max1 !== null && max1 < 0) || rate1 < 0) {
-      return 'Slab values and rates must be non-negative.';
-    }
-
-    if (max1 !== null && min1 > max1) {
-      return `Slab min (${min1}) cannot exceed max (${max1}).`;
-    }
-
-    for (let j = i + 1; j < slabs.length; j++) {
-      const s2 = slabs[j];
-      const min2 = parseInt(s2.minShowups) || 0;
-      const max2 = s2.maxShowups !== null && s2.maxShowups !== undefined ? parseInt(s2.maxShowups) : null;
-
-      // Overlap check
-      const startOverlap = max2 === null || min1 <= max2;
-      const endOverlap = max1 === null || min2 <= max1;
-
-      if (startOverlap && endOverlap) {
-        return `Overlapping range detected: [${min1}-${max1 ?? '∞'}] overlaps with [${min2}-${max2 ?? '∞'}].`;
-      }
-    }
-  }
-  return null;
-}
-
-// ==============================================================================
+// ---------------------------------------------------------------------------
 // Campaigns CRUD
-// ==============================================================================
+// ---------------------------------------------------------------------------
 
 exports.getCampaigns = async (req, res, next) => {
   try {
+    const allowedIds = await visibleCampaignIds(req.user);
+
+    const where = allowedIds === null ? {} : { id: { in: allowedIds } };
+
+    // Commission structures are compensation data. Admins see the full slab
+    // tables; everyone else sees only the campaigns they are on, and only the
+    // active structure that actually governs their pay.
     const campaigns = await prisma.campaign.findMany({
+      where,
       include: {
-        members: {
-          include: {
-            employee: { select: { id: true, fullName: true, employeeCode: true, designation: true } }
-          }
-        },
+        ...MEMBER_INCLUDE,
         commissionStructures: {
-          include: { slabs: true }
-        }
-      }
+          where: allowedIds === null ? {} : { status: 'active' },
+          include: { slabs: { orderBy: { minShowups: 'asc' } } },
+        },
+      },
+      orderBy: { name: 'asc' },
     });
+
     res.json(campaigns);
   } catch (err) {
     next(err);
@@ -62,14 +69,15 @@ exports.getCampaigns = async (req, res, next) => {
 
 exports.createCampaign = async (req, res, next) => {
   try {
-    const { name, description, startDate, endDate, notes, teamLeadId, sdrIds = [] } = req.body;
+    const { name, description, startDate, endDate, notes, monthlyShowupTarget, teamLeadId, sdrIds } =
+      req.body;
 
-    if (!name) {
-      return res.status(400).json({ error: 'Campaign name is required' });
+    const duplicate = await prisma.campaign.findUnique({ where: { name } });
+    if (duplicate) {
+      return res.status(409).json({ error: 'A campaign with this name already exists.' });
     }
 
     const campaign = await prisma.$transaction(async (tx) => {
-      // 1. Create campaign
       const camp = await tx.campaign.create({
         data: {
           name,
@@ -77,43 +85,27 @@ exports.createCampaign = async (req, res, next) => {
           status: 'active',
           startDate: startDate ? new Date(startDate) : null,
           endDate: endDate ? new Date(endDate) : null,
-          monthlyShowupTarget: 0,
-          notes
-        }
+          monthlyShowupTarget: monthlyShowupTarget ?? 0,
+          notes,
+        },
       });
 
-      // 2. Assign Team Lead if provided
-      if (teamLeadId) {
-        await tx.campaignMember.updateMany({
-          where: { employeeId: teamLeadId, status: 'active' },
-          data: { status: 'inactive' }
-        });
-        await tx.campaignMember.create({
-          data: {
-            campaignId: camp.id,
-            employeeId: teamLeadId,
-            role: 'team_lead',
-            status: 'active'
-          }
-        });
-      }
+      const assignments = [
+        ...(teamLeadId ? [{ employeeId: teamLeadId, role: 'team_lead' }] : []),
+        ...sdrIds.filter(Boolean).map((employeeId) => ({ employeeId, role: 'sdr' })),
+      ];
 
-      // 3. Assign SDRs if provided
-      for (const sdrId of sdrIds) {
-        if (sdrId) {
-          await tx.campaignMember.updateMany({
-            where: { employeeId: sdrId, status: 'active' },
-            data: { status: 'inactive' }
-          });
-          await tx.campaignMember.create({
-            data: {
-              campaignId: camp.id,
-              employeeId: sdrId,
-              role: 'sdr',
-              status: 'active'
-            }
-          });
-        }
+      for (const { employeeId, role } of assignments) {
+        // One active campaign per employee.
+        await tx.campaignMember.updateMany({
+          where: { employeeId, status: 'active' },
+          data: { status: 'inactive' },
+        });
+        await tx.campaignMember.upsert({
+          where: { campaignId_employeeId: { campaignId: camp.id, employeeId } },
+          create: { campaignId: camp.id, employeeId, role, status: 'active' },
+          update: { role, status: 'active' },
+        });
       }
 
       return camp;
@@ -129,22 +121,29 @@ exports.createCampaign = async (req, res, next) => {
 exports.updateCampaign = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, description, status, startDate, endDate, monthlyShowupTarget, notes } = req.body;
+    const updates = req.body;
 
-    const campaign = await prisma.campaign.update({
-      where: { id },
-      data: {
-        name,
-        description,
-        status,
-        startDate: startDate ? new Date(startDate) : null,
-        endDate: endDate ? new Date(endDate) : null,
-        monthlyShowupTarget: monthlyShowupTarget !== undefined ? parseInt(monthlyShowupTarget) : undefined,
-        notes
-      }
-    });
+    const existing = await prisma.campaign.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
 
-    await logAudit(req.user.id, 'UPDATE_CAMPAIGN', 'Campaign', id, { name, status });
+    // Only write what was actually sent. The old handler always assigned
+    // startDate/endDate, so editing just the name wiped both dates to null.
+    const data = {};
+    for (const key of ['name', 'description', 'status', 'notes', 'monthlyShowupTarget']) {
+      if (updates[key] !== undefined) data[key] = updates[key];
+    }
+    if (updates.startDate !== undefined) {
+      data.startDate = updates.startDate ? new Date(updates.startDate) : null;
+    }
+    if (updates.endDate !== undefined) {
+      data.endDate = updates.endDate ? new Date(updates.endDate) : null;
+    }
+
+    const campaign = await prisma.campaign.update({ where: { id }, data });
+
+    await logAudit(req.user.id, 'UPDATE_CAMPAIGN', 'Campaign', id, data);
     res.json(campaign);
   } catch (err) {
     next(err);
@@ -155,12 +154,27 @@ exports.deleteCampaign = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    // Direct deletion with cascade support
-    await prisma.campaign.delete({
-      where: { id }
+    const campaign = await prisma.campaign.findUnique({
+      where: { id },
+      include: { _count: { select: { performances: true, members: true } } },
     });
 
-    await logAudit(req.user.id, 'DELETE_CAMPAIGN', 'Campaign', id);
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+
+    // Deleting cascades to members, structures and logged performance. Once
+    // performance exists it is payroll evidence, so archive instead of destroy.
+    if (campaign._count.performances > 0) {
+      return res.status(409).json({
+        error:
+          'This campaign has logged performance history and cannot be deleted. Set its status to archived instead.',
+      });
+    }
+
+    await prisma.campaign.delete({ where: { id } });
+
+    await logAudit(req.user.id, 'DELETE_CAMPAIGN', 'Campaign', id, { name: campaign.name });
     res.json({ message: 'Campaign deleted successfully' });
   } catch (err) {
     next(err);
@@ -171,58 +185,57 @@ exports.duplicateCampaign = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    const sourceCampaign = await prisma.campaign.findUnique({
+    const source = await prisma.campaign.findUnique({
       where: { id },
-      include: {
-        commissionStructures: {
-          where: { status: 'active' },
-          include: { slabs: true }
-        }
-      }
+      include: { commissionStructures: { include: { slabs: true } } },
     });
 
-    if (!sourceCampaign) {
+    if (!source) {
       return res.status(404).json({ error: 'Campaign not found' });
     }
 
-    // Duplicate Campaign properties
-    const newName = `${sourceCampaign.name} (Copy) - ${Date.now()}`;
-    const newCampaign = await prisma.campaign.create({
-      data: {
-        name: newName,
-        description: sourceCampaign.description,
-        status: 'active',
-        startDate: sourceCampaign.startDate,
-        endDate: sourceCampaign.endDate,
-        monthlyShowupTarget: sourceCampaign.monthlyShowupTarget,
-        notes: sourceCampaign.notes
-      }
-    });
+    // Names are unique. The old version appended Date.now(), producing
+    // "Cleo HR (Copy) - 1756412355128"; find the next free "(Copy N)" instead.
+    let name = `${source.name} (Copy)`;
+    for (let n = 2; await prisma.campaign.findUnique({ where: { name } }); n++) {
+      name = `${source.name} (Copy ${n})`;
+    }
 
-    // Clone active structures and slabs if any exist
-    for (const struct of sourceCampaign.commissionStructures) {
-      const newStruct = await prisma.commissionStructure.create({
+    const newCampaign = await prisma.$transaction(async (tx) => {
+      const camp = await tx.campaign.create({
         data: {
-          campaignId: newCampaign.id,
-          name: `${struct.name} (Cloned)`,
-          status: 'draft',
-          startDate: struct.startDate,
-          endDate: struct.endDate
-        }
+          name,
+          description: source.description,
+          status: 'active',
+          startDate: source.startDate,
+          endDate: source.endDate,
+          monthlyShowupTarget: source.monthlyShowupTarget,
+          notes: source.notes,
+        },
       });
 
-      for (const slab of struct.slabs) {
-        await prisma.commissionSlab.create({
+      for (const structure of source.commissionStructures) {
+        await tx.commissionStructure.create({
           data: {
-            structureId: newStruct.id,
-            minShowups: slab.minShowups,
-            maxShowups: slab.maxShowups,
-            rate: slab.rate,
-            type: slab.type
-          }
+            campaignId: camp.id,
+            name: structure.name,
+            status: 'draft',
+            startDate: structure.startDate,
+            endDate: structure.endDate,
+            slabs: {
+              create: structure.slabs.map((s) => ({
+                minShowups: s.minShowups,
+                maxShowups: s.maxShowups,
+                rate: s.rate,
+                type: s.type,
+              })),
+            },
+          },
         });
       }
-    }
+
+      return camp;
+    });
 
     await logAudit(req.user.id, 'DUPLICATE_CAMPAIGN', 'Campaign', newCampaign.id, { sourceId: id });
     res.status(201).json(newCampaign);
@@ -231,65 +244,42 @@ exports.duplicateCampaign = async (req, res, next) => {
   }
 };
 
-// ==============================================================================
-// Campaign Member Assignments
-// ==============================================================================
+// ---------------------------------------------------------------------------
+// Membership
+// ---------------------------------------------------------------------------
 
 exports.assignMember = async (req, res, next) => {
   try {
     const { id: campaignId } = req.params;
-    const { employeeId, role } = req.body; // role: sdr, team_lead
+    const { employeeId, role } = req.body;
 
-    if (!employeeId || !role) {
-      return res.status(400).json({ error: 'employeeId and role are required' });
-    }
+    const [campaign, employee] = await Promise.all([
+      prisma.campaign.findUnique({ where: { id: campaignId } }),
+      prisma.employee.findUnique({ where: { id: employeeId } }),
+    ]);
 
-    // Enforce business rule: "Each employee can only belong to one active Campaign at a time"
-    // Deactivate active campaign memberships for this employee
-    await prisma.campaignMember.updateMany({
-      where: {
-        employeeId,
-        status: 'active'
-      },
-      data: {
-        status: 'inactive'
-      }
-    });
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (!employee) return res.status(404).json({ error: 'Employee not found' });
 
-    // Create or Upsert new active member assignment
-    const member = await prisma.campaignMember.upsert({
-      where: {
-        campaignId_employeeId: {
-          campaignId,
-          employeeId
-        }
-      },
-      create: {
-        campaignId,
-        employeeId,
-        role,
-        status: 'active'
-      },
-      update: {
-        role,
-        status: 'active'
-      }
-    });
-
-    // Sync the campaign member role to the User role in DB
-    const emp = await prisma.employee.findUnique({
-      where: { id: employeeId },
-      select: { userId: true }
-    });
-    if (emp && emp.userId) {
-      const newUserRole = role === 'team_lead' ? 'Team Lead' : 'SDR';
-      await prisma.user.update({
-        where: { id: emp.userId },
-        data: { role: newUserRole }
+    const member = await prisma.$transaction(async (tx) => {
+      // Business rule: one active campaign per employee.
+      await tx.campaignMember.updateMany({
+        where: { employeeId, status: 'active', campaignId: { not: campaignId } },
+        data: { status: 'inactive' },
       });
-    }
 
-    await logAudit(req.user.id, 'ASSIGN_CAMPAIGN_MEMBER', 'CampaignMember', member.id, { campaignId, employeeId, role });
+      return tx.campaignMember.upsert({
+        where: { campaignId_employeeId: { campaignId, employeeId } },
+        create: { campaignId, employeeId, role, status: 'active' },
+        update: { role, status: 'active' },
+      });
+    });
+
+    await logAudit(req.user.id, 'ASSIGN_CAMPAIGN_MEMBER', 'CampaignMember', member.id, {
+      campaignId,
+      employeeId,
+      role,
+    });
     res.json(member);
   } catch (err) {
     next(err);
@@ -300,28 +290,22 @@ exports.unassignMember = async (req, res, next) => {
   try {
     const { id: campaignId, employeeId } = req.params;
 
-    await prisma.campaignMember.delete({
-      where: {
-        campaignId_employeeId: {
-          campaignId,
-          employeeId
-        }
-      }
+    const member = await prisma.campaignMember.findUnique({
+      where: { campaignId_employeeId: { campaignId, employeeId } },
     });
 
-    // Revert User role to 'Employee' since they are unassigned
-    const emp = await prisma.employee.findUnique({
-      where: { id: employeeId },
-      select: { userId: true }
-    });
-    if (emp && emp.userId) {
-      await prisma.user.update({
-        where: { id: emp.userId },
-        data: { role: 'Employee' }
-      });
+    if (!member) {
+      return res.status(404).json({ error: 'This employee is not assigned to that campaign.' });
     }
 
-    await logAudit(req.user.id, 'UNASSIGN_CAMPAIGN_MEMBER', 'CampaignMember', null, { campaignId, employeeId });
+    await prisma.campaignMember.delete({
+      where: { campaignId_employeeId: { campaignId, employeeId } },
+    });
+
+    await logAudit(req.user.id, 'UNASSIGN_CAMPAIGN_MEMBER', 'CampaignMember', member.id, {
+      campaignId,
+      employeeId,
+    });
     res.json({ message: 'Employee unassigned from campaign successfully' });
   } catch (err) {
     next(err);
@@ -331,36 +315,20 @@ exports.unassignMember = async (req, res, next) => {
 exports.toggleMemberStatus = async (req, res, next) => {
   try {
     const { id: campaignId, employeeId } = req.params;
-    const { status } = req.body; // active, inactive
+    const { status } = req.body;
 
-    if (!status) {
-      return res.status(400).json({ error: 'Status is required' });
+    const existing = await prisma.campaignMember.findUnique({
+      where: { campaignId_employeeId: { campaignId, employeeId } },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: 'This employee is not assigned to that campaign.' });
     }
 
     const member = await prisma.campaignMember.update({
-      where: {
-        campaignId_employeeId: {
-          campaignId,
-          employeeId
-        }
-      },
-      data: { status }
+      where: { campaignId_employeeId: { campaignId, employeeId } },
+      data: { status },
     });
-
-    // Update User role depending on whether they are active or inactive
-    const emp = await prisma.employee.findUnique({
-      where: { id: employeeId },
-      select: { userId: true }
-    });
-    if (emp && emp.userId) {
-      const newUserRole = status === 'active'
-        ? (member.role === 'team_lead' ? 'Team Lead' : 'SDR')
-        : 'Employee';
-      await prisma.user.update({
-        where: { id: emp.userId },
-        data: { role: newUserRole }
-      });
-    }
 
     await logAudit(req.user.id, 'TOGGLE_MEMBER_STATUS', 'CampaignMember', member.id, { status });
     res.json(member);
@@ -369,17 +337,58 @@ exports.toggleMemberStatus = async (req, res, next) => {
   }
 };
 
-// ==============================================================================
-// Commission Structure & Slab Builders
-// ==============================================================================
+// ---------------------------------------------------------------------------
+// Commission structures
+// ---------------------------------------------------------------------------
+
+/**
+ * Reject overlapping or contradictory slab ranges before they can silently
+ * change someone's pay. Two slabs overlap when each starts at or before the
+ * other ends, treating a null max as infinity.
+ */
+function validateSlabs(slabs) {
+  for (let i = 0; i < slabs.length; i++) {
+    const a = slabs[i];
+    const aMax = a.maxShowups ?? Infinity;
+
+    if (a.minShowups > aMax) {
+      return `Slab minimum (${a.minShowups}) cannot exceed its maximum (${a.maxShowups}).`;
+    }
+
+    for (let j = i + 1; j < slabs.length; j++) {
+      const b = slabs[j];
+      const bMax = b.maxShowups ?? Infinity;
+
+      if (a.minShowups <= bMax && b.minShowups <= aMax) {
+        return `Overlapping slab ranges: [${a.minShowups}-${a.maxShowups ?? '∞'}] and [${b.minShowups}-${b.maxShowups ?? '∞'}].`;
+      }
+    }
+  }
+  return null;
+}
+
+/** A caller may read a campaign's structures only if they can see the campaign. */
+async function assertCampaignVisible(user, campaignId, res) {
+  const allowed = await visibleCampaignIds(user);
+  if (allowed === null || allowed.includes(campaignId)) return true;
+  res.status(403).json({ error: 'Access denied.' });
+  return false;
+}
 
 exports.getStructures = async (req, res, next) => {
   try {
     const { campaignId } = req.params;
+
+    if (!(await assertCampaignVisible(req.user, campaignId, res))) return;
+
     const structures = await prisma.commissionStructure.findMany({
-      where: { campaignId },
-      include: { slabs: true }
+      // Non-admins only ever see the structure their pay is actually computed
+      // from, never drafts being negotiated.
+      where: isAdmin(req.user) ? { campaignId } : { campaignId, status: 'active' },
+      include: { slabs: { orderBy: { minShowups: 'asc' } } },
+      orderBy: { createdAt: 'desc' },
     });
+
     res.json(structures);
   } catch (err) {
     next(err);
@@ -389,13 +398,13 @@ exports.getStructures = async (req, res, next) => {
 exports.createStructure = async (req, res, next) => {
   try {
     const { campaignId } = req.params;
-    const { name, startDate, endDate, slabs = [] } = req.body;
+    const { name, startDate, endDate, slabs } = req.body;
 
-    if (!name) {
-      return res.status(400).json({ error: 'Structure name is required' });
+    const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found' });
     }
 
-    // Range/Overlap validation
     const validationError = validateSlabs(slabs);
     if (validationError) {
       return res.status(400).json({ error: validationError });
@@ -408,19 +417,16 @@ exports.createStructure = async (req, res, next) => {
         status: 'draft',
         startDate: startDate ? new Date(startDate) : null,
         endDate: endDate ? new Date(endDate) : null,
-        slabs: {
-          create: slabs.map(s => ({
-            minShowups: parseInt(s.minShowups) || 0,
-            maxShowups: s.maxShowups !== null && s.maxShowups !== undefined ? parseInt(s.maxShowups) : null,
-            rate: parseFloat(s.rate) || 0,
-            type: s.type || 'per_showup'
-          }))
-        }
+        slabs: { create: slabs },
       },
-      include: { slabs: true }
+      include: { slabs: { orderBy: { minShowups: 'asc' } } },
     });
 
-    await logAudit(req.user.id, 'CREATE_COMMISSION_STRUCTURE', 'CommissionStructure', structure.id);
+    await logAudit(req.user.id, 'CREATE_COMMISSION_STRUCTURE', 'CommissionStructure', structure.id, {
+      campaignId,
+      name,
+      slabCount: slabs.length,
+    });
     res.status(201).json(structure);
   } catch (err) {
     next(err);
@@ -430,43 +436,37 @@ exports.createStructure = async (req, res, next) => {
 exports.updateStructure = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, status, startDate, endDate, slabs = [] } = req.body;
+    const { name, status, startDate, endDate, slabs } = req.body;
 
-    // Range/Overlap validation
+    const existing = await prisma.commissionStructure.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({ error: 'Commission structure not found' });
+    }
+
     const validationError = validateSlabs(slabs);
     if (validationError) {
       return res.status(400).json({ error: validationError });
     }
 
-    // Perform database transaction to recreate slabs and update structure
     const updated = await prisma.$transaction(async (tx) => {
-      // 1. Delete current slabs
-      await tx.commissionSlab.deleteMany({
-        where: { structureId: id }
-      });
+      await tx.commissionSlab.deleteMany({ where: { structureId: id } });
 
-      // 2. Update structure
+      const data = { slabs: { create: slabs } };
+      if (name !== undefined) data.name = name;
+      if (status !== undefined) data.status = status;
+      if (startDate !== undefined) data.startDate = startDate ? new Date(startDate) : null;
+      if (endDate !== undefined) data.endDate = endDate ? new Date(endDate) : null;
+
       return tx.commissionStructure.update({
         where: { id },
-        data: {
-          name,
-          status,
-          startDate: startDate ? new Date(startDate) : null,
-          endDate: endDate ? new Date(endDate) : null,
-          slabs: {
-            create: slabs.map(s => ({
-              minShowups: parseInt(s.minShowups) || 0,
-              maxShowups: s.maxShowups !== null && s.maxShowups !== undefined ? parseInt(s.maxShowups) : null,
-              rate: parseFloat(s.rate) || 0,
-              type: s.type || 'per_showup'
-            }))
-          }
-        },
-        include: { slabs: true }
+        data,
+        include: { slabs: { orderBy: { minShowups: 'asc' } } },
       });
     });
 
-    await logAudit(req.user.id, 'UPDATE_COMMISSION_STRUCTURE', 'CommissionStructure', id);
+    await logAudit(req.user.id, 'UPDATE_COMMISSION_STRUCTURE', 'CommissionStructure', id, {
+      slabCount: slabs.length,
+    });
     res.json(updated);
   } catch (err) {
     next(err);
@@ -477,9 +477,18 @@ exports.deleteStructure = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    await prisma.commissionStructure.delete({
-      where: { id }
-    });
+    const structure = await prisma.commissionStructure.findUnique({ where: { id } });
+    if (!structure) {
+      return res.status(404).json({ error: 'Commission structure not found' });
+    }
+
+    if (structure.status === 'active') {
+      return res.status(409).json({
+        error: 'The active commission structure cannot be deleted. Activate another one first.',
+      });
+    }
+
+    await prisma.commissionStructure.delete({ where: { id } });
 
     await logAudit(req.user.id, 'DELETE_COMMISSION_STRUCTURE', 'CommissionStructure', id);
     res.json({ message: 'Commission structure deleted successfully' });
@@ -492,265 +501,205 @@ exports.activateStructure = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    // Fetch the structure to verify campaign
-    const struct = await prisma.commissionStructure.findUnique({
-      where: { id }
+    const structure = await prisma.commissionStructure.findUnique({
+      where: { id },
+      include: { slabs: true },
     });
 
-    if (!struct) {
+    if (!structure) {
       return res.status(404).json({ error: 'Commission structure not found' });
     }
 
-    // Only one commission structure can be active for a campaign at any given time.
-    // Deactivate all others for this campaign
+    if (structure.slabs.length === 0) {
+      return res.status(400).json({
+        error: 'This structure has no slabs, so activating it would pay zero commission.',
+      });
+    }
+
     await prisma.$transaction([
       prisma.commissionStructure.updateMany({
-        where: {
-          campaignId: struct.campaignId,
-          id: { not: id }
-        },
-        data: { status: 'archived' }
+        where: { campaignId: structure.campaignId, id: { not: id } },
+        data: { status: 'archived' },
       }),
-      prisma.commissionStructure.update({
-        where: { id },
-        data: { status: 'active' }
-      })
+      prisma.commissionStructure.update({ where: { id }, data: { status: 'active' } }),
     ]);
 
-    await logAudit(req.user.id, 'ACTIVATE_COMMISSION_STRUCTURE', 'CommissionStructure', id, { campaignId: struct.campaignId });
+    await logAudit(req.user.id, 'ACTIVATE_COMMISSION_STRUCTURE', 'CommissionStructure', id, {
+      campaignId: structure.campaignId,
+    });
     res.json({ message: 'Commission structure activated' });
   } catch (err) {
     next(err);
   }
 };
 
-// ==============================================================================
-// Commission Preview Simulator
-// ==============================================================================
+// ---------------------------------------------------------------------------
+// Preview simulator
+// ---------------------------------------------------------------------------
 
 exports.previewCommission = async (req, res, next) => {
   try {
     const { campaignId, showups } = req.body;
-    const count = parseInt(showups) || 0;
 
-    if (!campaignId) {
-      return res.status(400).json({ error: 'campaignId is required' });
-    }
+    if (!(await assertCampaignVisible(req.user, campaignId, res))) return;
 
-    // Fetch active commission structure
     const structure = await prisma.commissionStructure.findFirst({
       where: { campaignId, status: 'active' },
-      include: { slabs: true }
+      include: { slabs: { orderBy: { minShowups: 'asc' } } },
     });
 
     if (!structure) {
-      return res.status(400).json({ error: 'No active commission structure found for this campaign' });
+      return res
+        .status(404)
+        .json({ error: 'No active commission structure is configured for this campaign.' });
     }
 
-    // Find matching slab
-    const slab = structure.slabs.find(s => 
-      count >= s.minShowups && 
-      (s.maxShowups === null || count <= s.maxShowups)
-    );
-
-    let amount = 0;
-    let description = '';
-
-    if (!slab) {
-      description = `0 showups (No matching slab found for ${count} showups)`;
-    } else {
-      const rate = slab.rate;
-      if (slab.type === 'per_showup') {
-        amount = count * rate;
-        description = `${count} Show-Ups × PKR ${rate.toLocaleString()} / show-up = PKR ${amount.toLocaleString()}`;
-      } else if (slab.type === 'fixed_monthly') {
-        amount = rate;
-        description = `Fixed Monthly payout: PKR ${amount.toLocaleString()} (matched slab ${slab.minShowups}-${slab.maxShowups ?? '∞'})`;
-      } else if (slab.type === 'percentage') {
-        amount = rate * count; // custom multiplier
-        description = `Percentage slab multiplier: ${rate}% / PKR override × ${count} = PKR ${amount.toLocaleString()}`;
-      } else if (slab.type === 'hybrid') {
-        // e.g. base amount (slab rate) + PKR 2000 per showup
-        const base = rate;
-        const perShowupExtra = 2000;
-        amount = base + (count * perShowupExtra);
-        description = `Hybrid: Fixed Base PKR ${base.toLocaleString()} + (${count} × PKR ${perShowupExtra.toLocaleString()}/show-up) = PKR ${amount.toLocaleString()}`;
-      } else {
-        amount = count * rate;
-        description = `Custom: ${count} × PKR ${rate.toLocaleString()} = PKR ${amount.toLocaleString()}`;
-      }
-    }
+    const slab = matchSlab(structure.slabs, showups);
 
     res.json({
       campaignId,
-      showups: count,
+      showups,
       structureName: structure.name,
-      slabMatched: slab ? { min: slab.minShowups, max: slab.maxShowups, rate: slab.rate, type: slab.type } : null,
-      calculatedCommission: amount,
-      formulaExplanation: description
+      slabMatched: slab
+        ? { min: slab.minShowups, max: slab.maxShowups, rate: slab.rate, type: slab.type }
+        : null,
+      calculatedCommission: calculateSlabCommission(slab, showups),
+      formulaExplanation: describeSlabCommission(slab, showups),
     });
-
   } catch (err) {
     next(err);
   }
 };
 
-// ==============================================================================
-// Campaign Performance Dashboard
-// ==============================================================================
+// ---------------------------------------------------------------------------
+// Dashboard & performance
+// ---------------------------------------------------------------------------
 
 exports.getCampaignDashboard = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { month, year } = req.query;
+    const now = new Date();
+    const month = Number(req.query.month) || now.getMonth() + 1;
+    const year = Number(req.query.year) || now.getFullYear();
 
-    const m = parseInt(month) || new Date().getMonth() + 1;
-    const y = parseInt(year) || new Date().getFullYear();
+    if (!(await assertCampaignVisible(req.user, id, res))) return;
 
     const campaign = await prisma.campaign.findUnique({
       where: { id },
       include: {
-        members: {
-          where: { status: 'active' },
-          include: {
-            employee: true
-          }
-        },
+        ...MEMBER_INCLUDE,
         commissionStructures: {
           where: { status: 'active' },
-          include: { slabs: true }
-        }
-      }
+          include: { slabs: { orderBy: { minShowups: 'asc' } } },
+        },
+      },
     });
 
     if (!campaign) {
       return res.status(404).json({ error: 'Campaign not found' });
     }
 
-    // Find the Team Lead
-    const teamLeadMember = campaign.members.find(m => m.role === 'team_lead');
-    const teamLeadName = teamLeadMember?.employee.fullName || 'No Lead Assigned';
-
-    // Filter SDRs
-    const sdrs = campaign.members.filter(m => m.role === 'sdr');
-    const sdrIds = sdrs.map(s => s.employee.id);
-
-    // Fetch Performance entries
     const performances = await prisma.campaignPerformance.findMany({
-      where: {
-        campaignId: id,
-        month: m,
-        year: y
-      },
-      include: {
-        employee: { select: { fullName: true, employeeCode: true } }
-      }
+      where: { campaignId: id, month, year },
+      include: { employee: { select: { fullName: true, employeeCode: true } } },
     });
 
-    // Sum overall campaign numbers
-    let totalMeetingsBooked = 0;
-    let totalShowups = 0;
-    let totalNoShows = 0;
-    let totalCancelled = 0;
-    let totalCommissionPaid = 0;
+    const perfByEmployee = new Map(performances.map((p) => [p.employeeId, p]));
+    const activeStructure = campaign.commissionStructures[0] || null;
+    const slabs = activeStructure?.slabs || [];
 
-    // Leaderboard mapping
-    const leaderboard = sdrs.map(sdr => {
-      const perf = performances.find(p => p.employeeId === sdr.employee.id) || {
-        meetingsBooked: 0,
-        showups: 0,
-        noShows: 0,
-        cancelledMeetings: 0
+    const teamLeadMember = campaign.members.find((m) => m.role === 'team_lead');
+    const sdrs = campaign.members.filter((m) => m.role === 'sdr');
+
+    const stats = {
+      meetingsBooked: 0,
+      showups: 0,
+      noShows: 0,
+      cancelledMeetings: 0,
+    };
+
+    const leaderboard = sdrs.map((member) => {
+      const perf = perfByEmployee.get(member.employee.id);
+      const row = {
+        meetingsBooked: perf?.meetingsBooked || 0,
+        showups: perf?.showups || 0,
+        noShows: perf?.noShows || 0,
+        cancelledMeetings: perf?.cancelledMeetings || 0,
       };
 
-      totalMeetingsBooked += perf.meetingsBooked;
-      totalShowups += perf.showups;
-      totalNoShows += perf.noShows;
-      totalCancelled += perf.cancelledMeetings;
-
-      // Calculate individual commission
-      let commission = 0;
-      const activeStructure = campaign.commissionStructures[0];
-      if (activeStructure && activeStructure.slabs.length > 0) {
-        const slab = activeStructure.slabs.find(s => 
-          perf.showups >= s.minShowups && 
-          (s.maxShowups === null || perf.showups <= s.maxShowups)
-        );
-        if (slab) {
-          if (slab.type === 'per_showup') {
-            commission = perf.showups * slab.rate;
-          } else if (slab.type === 'fixed_monthly') {
-            commission = slab.rate;
-          } else if (slab.type === 'percentage') {
-            commission = slab.rate * perf.showups;
-          } else if (slab.type === 'hybrid') {
-            commission = slab.rate + (perf.showups * 2000);
-          }
-        }
-      }
-      totalCommissionPaid += commission;
+      stats.meetingsBooked += row.meetingsBooked;
+      stats.showups += row.showups;
+      stats.noShows += row.noShows;
+      stats.cancelledMeetings += row.cancelledMeetings;
 
       return {
-        employeeId: sdr.employee.id,
-        fullName: sdr.employee.fullName,
-        code: sdr.employee.employeeCode,
-        meetingsBooked: perf.meetingsBooked,
-        showups: perf.showups,
-        noShows: perf.noShows,
-        cancelledMeetings: perf.cancelledMeetings,
-        commissionEarned: commission
+        employeeId: member.employee.id,
+        fullName: member.employee.fullName,
+        code: member.employee.employeeCode,
+        ...row,
+        commissionEarned: calculateSlabCommission(matchSlab(slabs, row.showups), row.showups),
       };
     });
 
-    // Sort leaderboard by showups descending
     leaderboard.sort((a, b) => b.showups - a.showups);
 
-    // Conversion rate: Showups / Meetings Booked
-    const conversionRate = totalMeetingsBooked > 0
-      ? parseFloat(((totalShowups / totalMeetingsBooked) * 100).toFixed(1))
-      : 0;
+    const sdrCommission = leaderboard.reduce((sum, row) => sum + row.commissionEarned, 0);
 
-    // Calculate Team Lead Override Commission
-    let teamLeadCommission = 0;
-    if (teamLeadMember && leaderboard.length > 0) {
-      const avgShowups = totalShowups / leaderboard.length;
-      const activeStructure = campaign.commissionStructures[0];
-      if (activeStructure && activeStructure.slabs.length > 0) {
-        // We look for overriding slabs configured for team leads
-        // Or default override calculation
-        const slab = activeStructure.slabs.find(s => 
-          avgShowups >= s.minShowups && 
-          (s.maxShowups === null || avgShowups <= s.maxShowups)
-        );
-        if (slab) {
-          teamLeadCommission = totalShowups * (slab.rate * 0.1); // e.g. 10% TL override rate
-        }
-      }
-    }
+    // The dashboard previously invented its own Team Lead formula
+    // (totalShowups * slab.rate * 0.1) while payroll used a completely different
+    // one, so the figure shown here never matched the payslip. Both now call the
+    // same helper.
+    const teamLeadCommission = teamLeadMember
+      ? calculateTeamLeadCommission({
+          campaignName: campaign.name,
+          teamShowups: stats.showups,
+          teamSize: sdrs.length,
+          slabs,
+        })
+      : 0;
 
     res.json({
       campaign: {
         id: campaign.id,
         name: campaign.name,
         status: campaign.status,
-        teamLead: teamLeadName,
-        totalSdrs: sdrs.length
+        teamLead: teamLeadMember?.employee.fullName || 'No Lead Assigned',
+        teamLeadId: teamLeadMember?.employee.id || null,
+        totalSdrs: sdrs.length,
+        monthlyShowupTarget: campaign.monthlyShowupTarget,
+        // The SDR dashboard reads its slab table from here; it used to look for
+        // `campaign.commissionStructures`, which this endpoint never returned,
+        // so the "matched commission slab" panel was permanently empty.
+        activeStructure: activeStructure
+          ? { id: activeStructure.id, name: activeStructure.name, slabs }
+          : null,
       },
+      period: { month, year },
       stats: {
-        meetingsBooked: totalMeetingsBooked,
-        showups: totalShowups,
-        noShows: totalNoShows,
-        cancelledMeetings: totalCancelled,
-        conversionRate,
-        commissionPaid: totalCommissionPaid + teamLeadCommission
+        ...stats,
+        conversionRate:
+          stats.meetingsBooked > 0
+            ? Number(((stats.showups / stats.meetingsBooked) * 100).toFixed(1))
+            : 0,
+        sdrCommission,
+        teamLeadCommission,
+        commissionPaid: sdrCommission + teamLeadCommission,
+        teamLeadCommissionBasis: describeTeamLeadCommission({
+          campaignName: campaign.name,
+          teamShowups: stats.showups,
+          teamSize: sdrs.length,
+        }),
       },
       leaderboard,
-      recentActivity: performances.map(p => ({
-        timestamp: p.updatedAt,
-        message: `${p.employee.fullName} updated: Show-Ups: ${p.showups}, No-Shows: ${p.noShows}`
-      })).slice(0, 10)
+      recentActivity: performances
+        .slice()
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 10)
+        .map((p) => ({
+          timestamp: p.updatedAt,
+          message: `${p.employee.fullName} — ${p.showups} show-ups, ${p.noShows} no-shows`,
+        })),
     });
-
   } catch (err) {
     next(err);
   }
@@ -758,42 +707,50 @@ exports.getCampaignDashboard = async (req, res, next) => {
 
 exports.logPerformance = async (req, res, next) => {
   try {
-    const { employeeId, campaignId, month, year, meetingsBooked, showups, noShows, cancelledMeetings } = req.body;
+    const { employeeId, campaignId, month, year, ...metrics } = req.body;
 
-    if (!employeeId || !campaignId || !month || !year) {
-      return res.status(400).json({ error: 'employeeId, campaignId, month, and year are required' });
+    const member = await prisma.campaignMember.findUnique({
+      where: { campaignId_employeeId: { campaignId, employeeId } },
+    });
+
+    if (!member) {
+      return res
+        .status(400)
+        .json({ error: 'That employee is not a member of this campaign.' });
     }
 
     const performance = await prisma.campaignPerformance.upsert({
       where: {
-        employeeId_campaignId_month_year: {
-          employeeId,
-          campaignId,
-          month: parseInt(month),
-          year: parseInt(year)
-        }
+        employeeId_campaignId_month_year: { employeeId, campaignId, month, year },
       },
       create: {
         employeeId,
         campaignId,
-        month: parseInt(month),
-        year: parseInt(year),
-        meetingsBooked: parseInt(meetingsBooked) || 0,
-        showups: parseInt(showups) || 0,
-        noShows: parseInt(noShows) || 0,
-        cancelledMeetings: parseInt(cancelledMeetings) || 0
+        month,
+        year,
+        meetingsBooked: metrics.meetingsBooked ?? 0,
+        showups: metrics.showups ?? 0,
+        noShows: metrics.noShows ?? 0,
+        cancelledMeetings: metrics.cancelledMeetings ?? 0,
       },
       update: {
-        meetingsBooked: meetingsBooked !== undefined ? parseInt(meetingsBooked) : undefined,
-        showups: showups !== undefined ? parseInt(showups) : undefined,
-        noShows: noShows !== undefined ? parseInt(noShows) : undefined,
-        cancelledMeetings: cancelledMeetings !== undefined ? parseInt(cancelledMeetings) : undefined
-      }
+        meetingsBooked: metrics.meetingsBooked,
+        showups: metrics.showups,
+        noShows: metrics.noShows,
+        cancelledMeetings: metrics.cancelledMeetings,
+      },
     });
 
-    await logAudit(req.user.id, 'LOG_CAMPAIGN_PERFORMANCE', 'CampaignPerformance', performance.id, { employeeId, month, year });
+    await logAudit(req.user.id, 'LOG_CAMPAIGN_PERFORMANCE', 'CampaignPerformance', performance.id, {
+      employeeId,
+      campaignId,
+      month,
+      year,
+    });
     res.json(performance);
   } catch (err) {
     next(err);
   }
 };
+
+module.exports.validateSlabs = validateSlabs;

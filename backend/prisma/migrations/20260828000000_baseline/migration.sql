@@ -28,21 +28,19 @@ CREATE TABLE "CompanyProfile" (
 );
 
 -- CreateTable
-CREATE TABLE "Department" (
+CREATE TABLE "Campaign" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "description" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'active',
+    "startDate" TIMESTAMP(3),
+    "endDate" TIMESTAMP(3),
+    "monthlyShowupTarget" INTEGER NOT NULL DEFAULT 0,
+    "notes" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "Department_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "Team" (
-    "id" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "departmentId" TEXT NOT NULL,
-
-    CONSTRAINT "Team_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "Campaign_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -52,21 +50,18 @@ CREATE TABLE "Employee" (
     "employeeCode" TEXT NOT NULL,
     "fullName" TEXT NOT NULL,
     "designation" TEXT NOT NULL,
-    "departmentId" TEXT,
-    "teamId" TEXT,
     "managerId" TEXT,
-    "dateOfJoining" TIMESTAMP(3) NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'active',
     "baseSalary" DOUBLE PRECISION NOT NULL DEFAULT 0,
     "currency" TEXT NOT NULL DEFAULT 'PKR',
     "phone" TEXT,
-    "cnic" TEXT,
+    "birthday" TEXT,
     "bankAccount" TEXT,
-    "address" TEXT,
     "emergencyContact" TEXT,
     "photoUrl" TEXT,
     "shiftStart" TEXT NOT NULL DEFAULT '09:30',
     "shiftEnd" TEXT NOT NULL DEFAULT '18:30',
+    "graceMinutes" INTEGER NOT NULL DEFAULT 15,
     "zkUserId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -89,42 +84,61 @@ CREATE TABLE "SalaryHistory" (
 );
 
 -- CreateTable
-CREATE TABLE "Project" (
+CREATE TABLE "CampaignMember" (
     "id" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "description" TEXT,
+    "campaignId" TEXT NOT NULL,
+    "employeeId" TEXT NOT NULL,
+    "role" TEXT NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'active',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "Project_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "CampaignMember_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
-CREATE TABLE "EmployeeProject" (
+CREATE TABLE "CommissionStructure" (
+    "id" TEXT NOT NULL,
+    "campaignId" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'draft',
+    "startDate" TIMESTAMP(3),
+    "endDate" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "CommissionStructure_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "CommissionSlab" (
+    "id" TEXT NOT NULL,
+    "structureId" TEXT NOT NULL,
+    "minShowups" INTEGER NOT NULL,
+    "maxShowups" INTEGER,
+    "rate" DOUBLE PRECISION NOT NULL,
+    "type" TEXT NOT NULL DEFAULT 'per_showup',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "CommissionSlab_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "CampaignPerformance" (
     "id" TEXT NOT NULL,
     "employeeId" TEXT NOT NULL,
-    "projectId" TEXT NOT NULL,
-    "role" TEXT NOT NULL,
+    "campaignId" TEXT NOT NULL,
+    "month" INTEGER NOT NULL,
+    "year" INTEGER NOT NULL,
+    "meetingsBooked" INTEGER NOT NULL DEFAULT 0,
+    "showups" INTEGER NOT NULL DEFAULT 0,
+    "noShows" INTEGER NOT NULL DEFAULT 0,
+    "cancelledMeetings" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "EmployeeProject_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "Commission" (
-    "id" TEXT NOT NULL,
-    "projectId" TEXT NOT NULL,
-    "role" TEXT NOT NULL,
-    "amount" DOUBLE PRECISION NOT NULL,
-
-    CONSTRAINT "Commission_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "TeamCommission" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "amount" DOUBLE PRECISION NOT NULL,
-
-    CONSTRAINT "TeamCommission_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "CampaignPerformance_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -258,6 +272,8 @@ CREATE TABLE "Payslip" (
     "bonus" DOUBLE PRECISION NOT NULL DEFAULT 0,
     "commission" DOUBLE PRECISION NOT NULL DEFAULT 0,
     "spiffs" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "attendanceAllowance" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "punctualityAllowance" DOUBLE PRECISION NOT NULL DEFAULT 0,
     "netPay" DOUBLE PRECISION NOT NULL,
     "showups" INTEGER NOT NULL DEFAULT 0,
     "meetingsScheduled" INTEGER NOT NULL DEFAULT 0,
@@ -315,7 +331,7 @@ CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
 CREATE UNIQUE INDEX "User_googleId_key" ON "User"("googleId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Department_name_key" ON "Department"("name");
+CREATE UNIQUE INDEX "Campaign_name_key" ON "Campaign"("name");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Employee_userId_key" ON "Employee"("userId");
@@ -324,19 +340,13 @@ CREATE UNIQUE INDEX "Employee_userId_key" ON "Employee"("userId");
 CREATE UNIQUE INDEX "Employee_employeeCode_key" ON "Employee"("employeeCode");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Employee_cnic_key" ON "Employee"("cnic");
-
--- CreateIndex
 CREATE UNIQUE INDEX "Employee_zkUserId_key" ON "Employee"("zkUserId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Project_name_key" ON "Project"("name");
+CREATE UNIQUE INDEX "CampaignMember_campaignId_employeeId_key" ON "CampaignMember"("campaignId", "employeeId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "EmployeeProject_employeeId_projectId_key" ON "EmployeeProject"("employeeId", "projectId");
-
--- CreateIndex
-CREATE UNIQUE INDEX "Commission_projectId_role_key" ON "Commission"("projectId", "role");
+CREATE UNIQUE INDEX "CampaignPerformance_employeeId_campaignId_month_year_key" ON "CampaignPerformance"("employeeId", "campaignId", "month", "year");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Attendance_employeeId_date_key" ON "Attendance"("employeeId", "date");
@@ -348,16 +358,7 @@ CREATE UNIQUE INDEX "PayrollRun_periodMonth_periodYear_key" ON "PayrollRun"("per
 CREATE UNIQUE INDEX "Payslip_payrollRunId_employeeId_key" ON "Payslip"("payrollRunId", "employeeId");
 
 -- AddForeignKey
-ALTER TABLE "Team" ADD CONSTRAINT "Team_departmentId_fkey" FOREIGN KEY ("departmentId") REFERENCES "Department"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
 ALTER TABLE "Employee" ADD CONSTRAINT "Employee_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Employee" ADD CONSTRAINT "Employee_departmentId_fkey" FOREIGN KEY ("departmentId") REFERENCES "Department"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Employee" ADD CONSTRAINT "Employee_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Employee" ADD CONSTRAINT "Employee_managerId_fkey" FOREIGN KEY ("managerId") REFERENCES "Employee"("id") ON DELETE SET NULL ON UPDATE CASCADE;
@@ -366,16 +367,22 @@ ALTER TABLE "Employee" ADD CONSTRAINT "Employee_managerId_fkey" FOREIGN KEY ("ma
 ALTER TABLE "SalaryHistory" ADD CONSTRAINT "SalaryHistory_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "Employee"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "EmployeeProject" ADD CONSTRAINT "EmployeeProject_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "Employee"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "CampaignMember" ADD CONSTRAINT "CampaignMember_campaignId_fkey" FOREIGN KEY ("campaignId") REFERENCES "Campaign"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "EmployeeProject" ADD CONSTRAINT "EmployeeProject_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "CampaignMember" ADD CONSTRAINT "CampaignMember_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "Employee"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Commission" ADD CONSTRAINT "Commission_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "CommissionStructure" ADD CONSTRAINT "CommissionStructure_campaignId_fkey" FOREIGN KEY ("campaignId") REFERENCES "Campaign"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "TeamCommission" ADD CONSTRAINT "TeamCommission_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "CommissionSlab" ADD CONSTRAINT "CommissionSlab_structureId_fkey" FOREIGN KEY ("structureId") REFERENCES "CommissionStructure"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "CampaignPerformance" ADD CONSTRAINT "CampaignPerformance_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "Employee"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "CampaignPerformance" ADD CONSTRAINT "CampaignPerformance_campaignId_fkey" FOREIGN KEY ("campaignId") REFERENCES "Campaign"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Spiff" ADD CONSTRAINT "Spiff_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "Employee"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -412,3 +419,4 @@ ALTER TABLE "AuditLog" ADD CONSTRAINT "AuditLog_userId_fkey" FOREIGN KEY ("userI
 
 -- AddForeignKey
 ALTER TABLE "Document" ADD CONSTRAINT "Document_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "Employee"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+

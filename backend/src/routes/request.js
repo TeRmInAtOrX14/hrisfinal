@@ -1,23 +1,45 @@
 const express = require('express');
+
+const controller = require('../controllers/request');
+const validate = require('../middlewares/validate');
+const schemas = require('../schemas');
+const { requireAuth, requireRole, requireEmployeeProfile } = require('../middlewares/auth');
+
 const router = express.Router();
-const requestController = require('../controllers/request');
-const { requireAuth, requireRole } = require('../middlewares/auth');
 
-const reviewerRoles = ['Admin', 'CEO', 'COO', 'Team Lead'];
+/**
+ * Only Admin/CEO/COO approve requests.
+ *
+ * 'Team Lead' used to be in this list, but every review handler then rejected
+ * Team Leads with a 403 — so the UI showed leads Approve/Reject buttons that
+ * always failed. Leads keep read access to their team's requests; the approval
+ * authority sits with admins, matching the enforced behaviour.
+ */
+const REVIEWERS = schemas.ADMIN_ROLES;
 
-// Leave Request Routes
-router.get('/leave', requireAuth, requestController.getLeaveRequests);
-router.post('/leave', requireAuth, requestController.createLeaveRequest);
-router.put('/leave/:id/review', requireAuth, requireRole(reviewerRoles), requestController.reviewLeaveRequest);
+router.use(requireAuth);
 
-// Half-day Request Routes
-router.get('/halfday', requireAuth, requestController.getHalfdayRequests);
-router.post('/halfday', requireAuth, requestController.createHalfdayRequest);
-router.put('/halfday/:id/review', requireAuth, requireRole(reviewerRoles), requestController.reviewHalfdayRequest);
+for (const [path, kind] of [
+  ['leave', 'Leave'],
+  ['halfday', 'Halfday'],
+  ['wfh', 'Wfh'],
+]) {
+  router.get(`/${path}`, controller[`get${kind}Requests`]);
+  router.get(`/${path}/mine`, requireEmployeeProfile, controller[`getMy${kind}Requests`]);
 
-// WFH Request Routes
-router.get('/wfh', requireAuth, requestController.getWfhRequests);
-router.post('/wfh', requireAuth, requestController.createWfhRequest);
-router.put('/wfh/:id/review', requireAuth, requireRole(reviewerRoles), requestController.reviewWfhRequest);
+  router.post(
+    `/${path}`,
+    requireEmployeeProfile,
+    validate(schemas.request[path]),
+    controller[`create${kind}Request`]
+  );
+
+  router.put(
+    `/${path}/:id/review`,
+    requireRole(REVIEWERS),
+    validate(schemas.request.review),
+    controller[`review${kind}Request`]
+  );
+}
 
 module.exports = router;

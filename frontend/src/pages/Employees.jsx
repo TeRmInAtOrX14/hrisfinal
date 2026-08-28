@@ -4,22 +4,27 @@ import { useForm } from 'react-hook-form';
 import {
   Search,
   Plus,
-  Mail,
-  User,
-  Shield,
-  Briefcase,
-  Calendar,
   X,
-  CreditCard,
-  Phone,
   Eye,
   Trash2,
   Loader2,
   Clock,
   Pencil
 } from 'lucide-react';
-import api from '../utils/api';
+import api, { session, apiError } from '../utils/api';
 import toast from 'react-hot-toast';
+import { isAdmin as isAdminRole } from '../utils/roles';
+import { money, longDate } from '../utils/format';
+
+/** Debounce a fast-changing value so typing does not fire a request per keystroke. */
+function useDebounced(value, delay = 350) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
 
 const getTeamPlaceholder = (emp) => {
   const role = emp.user?.role;
@@ -46,8 +51,9 @@ export default function Employees() {
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [detailEmployee, setDetailEmployee] = useState(null);
 
-  const currentUser = JSON.parse(localStorage.getItem('user')) || { role: 'Employee' };
-  const isAdmin = ['Admin', 'CEO', 'COO'].includes(currentUser.role);
+  const currentUser = session.user || { role: 'Employee' };
+  const isAdmin = isAdminRole(currentUser);
+  const debouncedSearch = useDebounced(search);
 
   const addForm = useForm({
     defaultValues: {
@@ -64,7 +70,7 @@ export default function Employees() {
     register: registerEdit,
     handleSubmit: handleSubmitEdit,
     reset: resetEdit,
-    formState: { errors: errorsEdit }
+    formState: { errors: errorsEdit },
   } = editForm;
 
   const [editModalOpen, setEditModalOpen] = useState(false);
@@ -108,17 +114,24 @@ export default function Employees() {
         setDetailEmployee(res.data);
       }
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to update employee');
+      toast.error(apiError(err, 'Failed to update employee.'));
     }
   };
 
   const fetchEmployees = async () => {
     try {
       setLoading(true);
-      const res = await api.get(`/employees?teamId=${selectedTeam}&search=${search}`);
+      // The API filters on `campaignId`; this sent `teamId`, so the Team
+      // dropdown silently did nothing. Values are encoded too, so an ampersand
+      // or hash in a search term no longer corrupts the query string.
+      const params = new URLSearchParams();
+      if (selectedTeam) params.set('campaignId', selectedTeam);
+      if (debouncedSearch) params.set('search', debouncedSearch);
+
+      const res = await api.get(`/employees?${params}`);
       setEmployees(res.data);
     } catch (e) {
-      toast.error('Failed to load employee directory');
+      toast.error(apiError(e, 'Failed to load the employee directory.'));
     } finally {
       setLoading(false);
     }
@@ -128,14 +141,15 @@ export default function Employees() {
     try {
       const tms = await api.get('/employees/teams');
       setTeams(tms.data);
-    } catch (e) {
-      console.error('Failed to load filter metadata');
+    } catch (err) {
+      console.error('Failed to load campaign filter options:', apiError(err));
     }
   };
 
   useEffect(() => {
     fetchEmployees();
-  }, [selectedTeam, search]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTeam, debouncedSearch]);
 
   useEffect(() => {
     fetchFilters();
@@ -149,7 +163,7 @@ export default function Employees() {
       reset();
       fetchEmployees();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to create employee');
+      toast.error(apiError(err, 'Failed to create employee.'));
     }
   };
 
@@ -161,7 +175,7 @@ export default function Employees() {
         setDetailEmployee(null);
         fetchEmployees();
       } catch (e) {
-        toast.error('Termination action failed');
+        toast.error(apiError(e, 'Termination failed.'));
       }
     }
   };
@@ -174,7 +188,7 @@ export default function Employees() {
         setDetailEmployee(null);
         fetchEmployees();
       } catch (e) {
-        toast.error('Failed to delete employee record');
+        toast.error(apiError(e, 'Failed to delete the employee record.'));
       }
     }
   };
@@ -184,7 +198,7 @@ export default function Employees() {
       {/* Title Header */}
       <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4">
         <div>
-          <h2 className="text-xl font-extrabold tracking-tight text-white font-display uppercase">Employee Directory</h2>
+          <h2 className="text-xl font-extrabold tracking-tight text-brand-text font-display uppercase">Employee Directory</h2>
           <p className="text-xs text-brand-text-soft mt-1">Manage personnel registry, team mapping, and shift timing properties.</p>
         </div>
         {isAdmin && (
@@ -208,7 +222,7 @@ export default function Employees() {
             placeholder="Search by name, code or title..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-brand-border bg-brand-bg/40 text-xs text-white focus:outline-none focus:border-brand-blue transition-colors"
+            className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-brand-border bg-brand-bg/40 text-xs text-brand-text focus:outline-none focus:border-brand-blue transition-colors"
           />
         </div>
 
@@ -217,7 +231,7 @@ export default function Employees() {
           <select
             value={selectedTeam}
             onChange={(e) => setSelectedTeam(e.target.value)}
-            className="w-full px-4 py-2.5 rounded-xl border border-brand-border bg-brand-bg/40 text-xs text-white focus:outline-none focus:border-brand-blue appearance-none cursor-pointer"
+            className="w-full px-4 py-2.5 rounded-xl border border-brand-border bg-brand-bg/40 text-xs text-brand-text focus:outline-none focus:border-brand-blue appearance-none cursor-pointer"
           >
             <option value="">All Teams</option>
             {teams.map(t => (
@@ -256,7 +270,7 @@ export default function Employees() {
                 {employees.map(emp => (
                   <tr key={emp.id} className="hover:bg-brand-bg-elevated/20 transition-colors">
                     <td className="p-4 font-mono text-brand-blue font-bold">{emp.employeeCode}</td>
-                    <td className="p-4 font-bold text-white">{emp.fullName}</td>
+                    <td className="p-4 font-bold text-brand-text">{emp.fullName}</td>
                     <td className="p-4 text-brand-text-soft">{emp.designation}</td>
                     <td className="p-4">
                       <div className="flex flex-wrap gap-1">
@@ -273,7 +287,7 @@ export default function Employees() {
                         )}
                       </div>
                     </td>
-                    <td className="p-4 font-mono text-white/95 font-medium">{emp.bankAccount || '-'}</td>
+                    <td className="p-4 font-mono text-brand-text font-medium">{emp.bankAccount || '-'}</td>
                     <td className="p-4 font-medium text-brand-text-soft font-mono">{emp.shiftStart} - {emp.shiftEnd}</td>
                     <td className="p-4">
                       <span className={`px-2 py-0.5 rounded-full text-[9px] font-extrabold uppercase tracking-wider border ${
@@ -288,7 +302,7 @@ export default function Employees() {
                       <div className="flex justify-end gap-2">
                         <button
                           onClick={() => setDetailEmployee(emp)}
-                          className="p-1.5 rounded-xl border border-brand-border text-brand-text-soft hover:text-white hover:border-brand-blue-soft transition-colors cursor-pointer"
+                          className="p-1.5 rounded-xl border border-brand-border text-brand-text-soft hover:text-brand-text hover:border-brand-blue-soft transition-colors cursor-pointer"
                           title="View Profile"
                         >
                           <Eye className="w-3.5 h-3.5" />
@@ -296,7 +310,7 @@ export default function Employees() {
                         {(isAdmin || currentUser.id === emp.userId || (currentUser.employee && currentUser.employee.id === emp.id)) && (
                           <button
                             onClick={() => handleEditClick(emp)}
-                            className="p-1.5 rounded-xl border border-brand-border text-brand-text-soft hover:text-white hover:border-brand-blue-soft transition-colors cursor-pointer"
+                            className="p-1.5 rounded-xl border border-brand-border text-brand-text-soft hover:text-brand-text hover:border-brand-blue-soft transition-colors cursor-pointer"
                             title="Edit Profile"
                           >
                             <Pencil className="w-3.5 h-3.5" />
@@ -328,9 +342,9 @@ export default function Employees() {
                 <div className="flex items-center justify-between border-b border-brand-border pb-4 mb-6">
                   <div>
                     <span className="text-[10px] font-mono font-bold text-brand-blue">{detailEmployee.employeeCode}</span>
-                    <h3 className="text-lg font-extrabold text-white font-display mt-0.5">{detailEmployee.fullName}</h3>
+                    <h3 className="text-lg font-extrabold text-brand-text font-display mt-0.5">{detailEmployee.fullName}</h3>
                   </div>
-                  <button onClick={() => setDetailEmployee(null)} className="p-1.5 rounded-xl border border-brand-border text-brand-text-soft hover:text-white cursor-pointer">
+                  <button onClick={() => setDetailEmployee(null)} className="p-1.5 rounded-xl border border-brand-border text-brand-text-soft hover:text-brand-text cursor-pointer">
                     <X className="w-4 h-4" />
                   </button>
                 </div>
@@ -340,15 +354,15 @@ export default function Employees() {
                   <div className="p-4 rounded-2xl bg-brand-bg border border-brand-border grid grid-cols-2 gap-4">
                     <div className="col-span-2">
                       <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">Email Address</p>
-                      <p className="text-xs text-white font-semibold mt-1 truncate">{detailEmployee.user?.email || '-'}</p>
+                      <p className="text-xs text-brand-text font-semibold mt-1 truncate">{detailEmployee.user?.email || '-'}</p>
                     </div>
                     <div>
                       <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">User Role</p>
-                      <p className="text-xs text-white font-semibold mt-1">{detailEmployee.user?.role || '-'}</p>
+                      <p className="text-xs text-brand-text font-semibold mt-1">{detailEmployee.user?.role || '-'}</p>
                     </div>
                     <div>
                       <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">Designation</p>
-                      <p className="text-xs text-white font-semibold mt-1">{detailEmployee.designation}</p>
+                      <p className="text-xs text-brand-text font-semibold mt-1">{detailEmployee.designation}</p>
                     </div>
                     <div>
                       <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">Teams Assigned</p>
@@ -366,47 +380,47 @@ export default function Employees() {
                     </div>
                     <div>
                       <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">Birthday</p>
-                      <p className="text-xs text-white font-semibold mt-1">
+                      <p className="text-xs text-brand-text font-semibold mt-1">
                         {detailEmployee.birthday || '-'}
                       </p>
                     </div>
                   </div>
 
-                  <h4 className="text-xs font-bold text-white uppercase tracking-widest font-display">Salary & Shift Details</h4>
+                  <h4 className="text-xs font-bold text-brand-text uppercase tracking-widest font-display">Salary & Shift Details</h4>
                   <div className="p-4 rounded-2xl bg-brand-bg border border-brand-border grid grid-cols-2 gap-4">
                     <div>
                       <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">Base Salary</p>
                       <p className="text-xs text-brand-cyan font-bold mt-1 font-mono">
-                        {detailEmployee.currency} {detailEmployee.baseSalary?.toLocaleString()}
+                        {money(detailEmployee.baseSalary, detailEmployee.currency)}
                       </p>
                     </div>
                     <div>
                       <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">Shift Timings</p>
-                      <p className="text-xs text-white font-mono mt-1 font-bold">{detailEmployee.shiftStart} - {detailEmployee.shiftEnd}</p>
+                      <p className="text-xs text-brand-text font-mono mt-1 font-bold">{detailEmployee.shiftStart} - {detailEmployee.shiftEnd}</p>
                     </div>
                     <div>
                       <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">Biometric Device ID</p>
-                      <p className="text-xs text-white font-mono mt-1 font-bold">{detailEmployee.zkUserId || '-'}</p>
+                      <p className="text-xs text-brand-text font-mono mt-1 font-bold">{detailEmployee.zkUserId || '-'}</p>
                     </div>
                     <div>
                       <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">Mobile Phone</p>
-                      <p className="text-xs text-white font-semibold mt-1 font-mono">{detailEmployee.phone || '-'}</p>
+                      <p className="text-xs text-brand-text font-semibold mt-1 font-mono">{detailEmployee.phone || '-'}</p>
                     </div>
                   </div>
 
                   {/* Salary History */}
                   {detailEmployee.salaryHistory?.length > 0 && (
                     <div className="space-y-3">
-                      <h4 className="text-xs font-bold text-white uppercase tracking-widest font-display">Salary History Log</h4>
+                      <h4 className="text-xs font-bold text-brand-text uppercase tracking-widest font-display">Salary History Log</h4>
                       <div className="space-y-2">
                         {detailEmployee.salaryHistory.map((sh, idx) => (
                           <div key={idx} className="p-3.5 rounded-xl border border-brand-border bg-brand-bg flex justify-between items-center">
                             <div>
-                              <p className="text-xs font-bold text-brand-cyan font-mono">PKR {sh.newSalary.toLocaleString()}</p>
+                              <p className="text-xs font-bold text-brand-cyan font-mono">{money(sh.newSalary)}</p>
                               <p className="text-[10px] text-brand-text-soft mt-0.5">{sh.reason}</p>
                             </div>
                             <span className="text-[9px] text-brand-text-mute font-mono">
-                              {new Date(sh.effectiveDate).toLocaleDateString()}
+                              {longDate(sh.effectiveDate)}
                             </span>
                           </div>
                         ))}
@@ -454,8 +468,8 @@ export default function Employees() {
               className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl bg-brand-bg-elevated border border-brand-border rounded-2xl p-6 shadow-glow z-50 max-h-[85vh] overflow-y-auto"
             >
               <div className="flex items-center justify-between border-b border-brand-border pb-4 mb-6">
-                <h3 className="text-sm font-extrabold text-white font-display uppercase">Add New Employee Profile</h3>
-                <button onClick={() => setAddModalOpen(false)} className="p-1.5 rounded-xl border border-brand-border text-brand-text-soft hover:text-white cursor-pointer">
+                <h3 className="text-sm font-extrabold text-brand-text font-display uppercase">Add New Employee Profile</h3>
+                <button onClick={() => setAddModalOpen(false)} className="p-1.5 rounded-xl border border-brand-border text-brand-text-soft hover:text-brand-text cursor-pointer">
                   <X className="w-4 h-4" />
                 </button>
               </div>
@@ -467,27 +481,41 @@ export default function Employees() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Email Address *</label>
                     <input
                       type="email"
-                      {...register('email', { required: true })}
+                      {...register('email', { required: 'A valid email is required' })}
                       placeholder="e.g. employee@brandigade.com"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Login Password *</label>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Temporary Password *</label>
                     <input
                       type="password"
-                      {...register('password', { required: true })}
-                      placeholder="e.g. Password123!"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      {...register('password', {
+                        required: 'A password is required',
+                        minLength: { value: 10, message: 'At least 10 characters' },
+                        validate: {
+                          mixedCase: (v) =>
+                            (/[a-z]/.test(v) && /[A-Z]/.test(v)) || 'Include upper and lower case',
+                          digit: (v) => /\d/.test(v) || 'Include at least one number',
+                        },
+                      })}
+                      placeholder="Min 10 chars, mixed case + number"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
+                    {errors.password && (
+                      <span className="text-[10px] text-brand-red mt-1 block">{errors.password.message}</span>
+                    )}
+                    <p className="text-[9px] text-brand-text-mute mt-1.5 leading-relaxed">
+                      The employee is required to change this the first time they sign in.
+                    </p>
                   </div>
 
                   <div>
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Role *</label>
                     <select
                       {...register('role', { required: true })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none cursor-pointer"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none cursor-pointer"
                     >
                       <option value="Employee">Employee</option>
                       <option value="SDR">SDR</option>
@@ -503,9 +531,9 @@ export default function Employees() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Employee Code *</label>
                     <input
                       type="text"
-                      {...register('employeeCode', { required: true })}
+                      {...register('employeeCode', { required: 'Employee code is required' })}
                       placeholder="e.g. EMP-004"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
                   </div>
 
@@ -513,9 +541,9 @@ export default function Employees() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Full Name *</label>
                     <input
                       type="text"
-                      {...register('fullName', { required: true })}
+                      {...register('fullName', { required: 'Full name is required' })}
                       placeholder="e.g. Raameen Ali"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
                   </div>
 
@@ -523,9 +551,9 @@ export default function Employees() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Designation *</label>
                     <input
                       type="text"
-                      {...register('designation', { required: true })}
+                      {...register('designation', { required: 'Designation is required' })}
                       placeholder="e.g. SDR Outbound Campaigner"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
                   </div>
 
@@ -533,7 +561,7 @@ export default function Employees() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Projects / Teams Assigned</label>
                     <div className="grid grid-cols-2 md:grid-cols-3 gap-2.5 p-3.5 rounded-xl border border-brand-border bg-brand-bg">
                       {teams.map(t => (
-                        <label key={t.id} className="flex items-center gap-2 text-xs text-white cursor-pointer select-none">
+                        <label key={t.id} className="flex items-center gap-2 text-xs text-brand-text cursor-pointer select-none">
                           <input
                             type="checkbox"
                             value={t.id}
@@ -550,9 +578,9 @@ export default function Employees() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Base Monthly Salary (PKR) *</label>
                     <input
                       type="number"
-                      {...register('baseSalary', { required: true })}
+                      {...register('baseSalary', { required: 'Base salary is required' })}
                       placeholder="e.g. 55000"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
                   </div>
 
@@ -562,7 +590,7 @@ export default function Employees() {
                       type="text"
                       {...register('birthday')}
                       placeholder="e.g. 15th June"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
                   </div>
 
@@ -572,7 +600,7 @@ export default function Employees() {
                       type="text"
                       {...register('bankAccount')}
                       placeholder="e.g. Meezan Bank - 02341234"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
                   </div>
 
@@ -582,7 +610,7 @@ export default function Employees() {
                       type="text"
                       {...register('zkUserId')}
                       placeholder="e.g. 4"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none"
                     />
                   </div>
 
@@ -590,22 +618,20 @@ export default function Employees() {
                   <div>
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Shift Start Time *</label>
                     <input
-                      type="text"
+                      type="time"
                       defaultValue="09:30"
-                      {...register('shiftStart', { required: true })}
-                      placeholder="e.g. 09:30"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      {...register('shiftStart', { required: 'Shift start is required' })}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
                   </div>
 
                   <div>
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Shift End Time *</label>
                     <input
-                      type="text"
+                      type="time"
                       defaultValue="18:30"
-                      {...register('shiftEnd', { required: true })}
-                      placeholder="e.g. 18:30"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      {...register('shiftEnd', { required: 'Shift end is required' })}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
                   </div>
 
@@ -616,17 +642,25 @@ export default function Employees() {
                       defaultValue="15"
                       {...register('graceMinutes', { required: true })}
                       placeholder="e.g. 15"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
                   </div>
 
                   </div>
 
+                {Object.keys(errors).length > 0 && (
+                  <ul className="text-[11px] text-brand-red space-y-1 border border-brand-red/25 bg-brand-red/5 rounded-xl p-3">
+                    {Object.entries(errors).map(([field, error]) => (
+                      <li key={field}>{error.message || `${field} is invalid`}</li>
+                    ))}
+                  </ul>
+                )}
+
                 <div className="mt-6 flex gap-3 justify-end border-t border-brand-border pt-4">
                   <button
                     type="button"
                     onClick={() => setAddModalOpen(false)}
-                    className="px-5 py-2 rounded-full border border-brand-border hover:bg-brand-bg font-semibold text-xs text-brand-text-soft hover:text-white transition-colors cursor-pointer"
+                    className="px-5 py-2 rounded-full border border-brand-border hover:bg-brand-bg font-semibold text-xs text-brand-text-soft hover:text-brand-text transition-colors cursor-pointer"
                   >
                     Cancel
                   </button>
@@ -655,8 +689,8 @@ export default function Employees() {
               className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl bg-brand-bg-elevated border border-brand-border rounded-2xl p-6 shadow-glow z-50 max-h-[85vh] overflow-y-auto"
             >
               <div className="flex items-center justify-between border-b border-brand-border pb-4 mb-6">
-                <h3 className="text-sm font-extrabold text-white font-display uppercase">Edit Employee Profile</h3>
-                <button onClick={() => setEditModalOpen(false)} className="p-1.5 rounded-xl border border-brand-border text-brand-text-soft hover:text-white cursor-pointer">
+                <h3 className="text-sm font-extrabold text-brand-text font-display uppercase">Edit Employee Profile</h3>
+                <button onClick={() => setEditModalOpen(false)} className="p-1.5 rounded-xl border border-brand-border text-brand-text-soft hover:text-brand-text cursor-pointer">
                   <X className="w-4 h-4" />
                 </button>
               </div>
@@ -668,10 +702,10 @@ export default function Employees() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Email Address *</label>
                     <input
                       type="email"
-                      {...registerEdit('email', { required: true })}
+                      {...registerEdit('email', { required: 'A valid email is required' })}
                       placeholder="e.g. employee@brandigade.com"
                       disabled={!isAdmin}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue disabled:opacity-50"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue disabled:opacity-50"
                     />
                   </div>
 
@@ -680,7 +714,7 @@ export default function Employees() {
                     <select
                       {...registerEdit('role', { required: true })}
                       disabled={!isAdmin}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none cursor-pointer disabled:opacity-50"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none cursor-pointer disabled:opacity-50"
                     >
                       <option value="Employee">Employee</option>
                       <option value="SDR">SDR</option>
@@ -696,7 +730,7 @@ export default function Employees() {
                     <select
                       {...registerEdit('isActive', { setValueAs: v => v === 'true' })}
                       disabled={!isAdmin}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none cursor-pointer disabled:opacity-50"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none cursor-pointer disabled:opacity-50"
                     >
                       <option value="true">Active Login</option>
                       <option value="false">Disabled / Blocked</option>
@@ -708,7 +742,7 @@ export default function Employees() {
                     <select
                       {...registerEdit('status', { required: true })}
                       disabled={!isAdmin}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none cursor-pointer disabled:opacity-50"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none cursor-pointer disabled:opacity-50"
                     >
                       <option value="active">Active</option>
                       <option value="on_leave">On Leave</option>
@@ -722,10 +756,10 @@ export default function Employees() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Employee Code *</label>
                     <input
                       type="text"
-                      {...registerEdit('employeeCode', { required: true })}
+                      {...registerEdit('employeeCode', { required: 'Employee code is required' })}
                       disabled={!isAdmin}
                       placeholder="e.g. EMP-004"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue disabled:opacity-50"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue disabled:opacity-50"
                     />
                   </div>
 
@@ -733,10 +767,10 @@ export default function Employees() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Full Name *</label>
                     <input
                       type="text"
-                      {...registerEdit('fullName', { required: true })}
+                      {...registerEdit('fullName', { required: 'Full name is required' })}
                       disabled={!isAdmin}
                       placeholder="e.g. Raameen Ali"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue disabled:opacity-50"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue disabled:opacity-50"
                     />
                   </div>
 
@@ -744,10 +778,10 @@ export default function Employees() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Designation *</label>
                     <input
                       type="text"
-                      {...registerEdit('designation', { required: true })}
+                      {...registerEdit('designation', { required: 'Designation is required' })}
                       disabled={!isAdmin}
                       placeholder="e.g. SDR Outbound Campaigner"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue disabled:opacity-50"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue disabled:opacity-50"
                     />
                   </div>
 
@@ -755,7 +789,7 @@ export default function Employees() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Projects / Teams Assigned</label>
                     <div className="grid grid-cols-2 md:grid-cols-3 gap-2.5 p-3.5 rounded-xl border border-brand-border bg-brand-bg">
                       {teams.map(t => (
-                        <label key={t.id} className="flex items-center gap-2 text-xs text-white cursor-pointer select-none">
+                        <label key={t.id} className="flex items-center gap-2 text-xs text-brand-text cursor-pointer select-none">
                           <input
                             type="checkbox"
                             value={t.id}
@@ -773,10 +807,10 @@ export default function Employees() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Base Monthly Salary (PKR) *</label>
                     <input
                       type="number"
-                      {...registerEdit('baseSalary', { required: true })}
+                      {...registerEdit('baseSalary', { required: 'Base salary is required' })}
                       disabled={!isAdmin}
                       placeholder="e.g. 55000"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue disabled:opacity-50"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue disabled:opacity-50"
                     />
                   </div>
 
@@ -786,7 +820,7 @@ export default function Employees() {
                       type="text"
                       {...registerEdit('birthday')}
                       placeholder="e.g. 15th June"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
                   </div>
 
@@ -797,29 +831,27 @@ export default function Employees() {
                       {...registerEdit('zkUserId')}
                       disabled={!isAdmin}
                       placeholder="e.g. 4"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none disabled:opacity-50"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none disabled:opacity-50"
                     />
                   </div>
 
                   <div>
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Shift Start Time *</label>
                     <input
-                      type="text"
-                      {...registerEdit('shiftStart', { required: true })}
+                      type="time"
+                      {...registerEdit('shiftStart', { required: 'Shift start is required' })}
                       disabled={!isAdmin}
-                      placeholder="e.g. 09:30"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue disabled:opacity-50"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue disabled:opacity-50"
                     />
                   </div>
 
                   <div>
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-brand-text-soft mb-2">Shift End Time *</label>
                     <input
-                      type="text"
-                      {...registerEdit('shiftEnd', { required: true })}
+                      type="time"
+                      {...registerEdit('shiftEnd', { required: 'Shift end is required' })}
                       disabled={!isAdmin}
-                      placeholder="e.g. 18:30"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue disabled:opacity-50"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue disabled:opacity-50"
                     />
                   </div>
 
@@ -830,7 +862,7 @@ export default function Employees() {
                       {...registerEdit('graceMinutes', { required: true })}
                       disabled={!isAdmin}
                       placeholder="e.g. 15"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                     />
                   </div>
 
@@ -840,7 +872,7 @@ export default function Employees() {
                       type="text"
                       {...registerEdit('phone')}
                       placeholder="e.g. +92 300 1234567"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none"
                     />
                   </div>
 
@@ -850,7 +882,7 @@ export default function Employees() {
                       type="text"
                       {...registerEdit('emergencyContact')}
                       placeholder="e.g. Brother: +92 300 7654321"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none"
                     />
                   </div>
 
@@ -860,7 +892,7 @@ export default function Employees() {
                       type="text"
                       {...registerEdit('bankAccount')}
                       placeholder="e.g. Meezan Bank - 02341234"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none"
                     />
                   </div>
 
@@ -875,7 +907,7 @@ export default function Employees() {
                         <input
                           type="date"
                           {...registerEdit('salaryChangeEffectiveDate')}
-                          className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                         />
                       </div>
                       <div>
@@ -884,18 +916,26 @@ export default function Employees() {
                           type="text"
                           {...registerEdit('salaryChangeReason')}
                           placeholder="e.g. Annual Appraisal, Promotion"
-                          className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-white focus:outline-none focus:border-brand-blue"
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-brand-border bg-brand-bg text-xs text-brand-text focus:outline-none focus:border-brand-blue"
                         />
                       </div>
                     </div>
                   </div>
                 </div>
 
+                {Object.keys(errorsEdit).length > 0 && (
+                  <ul className="text-[11px] text-brand-red space-y-1 border border-brand-red/25 bg-brand-red/5 rounded-xl p-3">
+                    {Object.entries(errorsEdit).map(([field, error]) => (
+                      <li key={field}>{error.message || `${field} is invalid`}</li>
+                    ))}
+                  </ul>
+                )}
+
                 <div className="mt-6 flex gap-3 justify-end border-t border-brand-border pt-4">
                   <button
                     type="button"
                     onClick={() => setEditModalOpen(false)}
-                    className="px-5 py-2 rounded-full border border-brand-border hover:bg-brand-bg font-semibold text-xs text-brand-text-soft hover:text-white transition-colors cursor-pointer"
+                    className="px-5 py-2 rounded-full border border-brand-border hover:bg-brand-bg font-semibold text-xs text-brand-text-soft hover:text-brand-text transition-colors cursor-pointer"
                   >
                     Cancel
                   </button>

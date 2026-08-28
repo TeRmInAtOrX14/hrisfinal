@@ -1,34 +1,36 @@
 const jwt = require('jsonwebtoken');
+const config = require('../config/env');
 
-const accessSecret = process.env.JWT_SECRET || 'fallback_access_secret';
-const refreshSecret = process.env.JWT_REFRESH_SECRET || 'fallback_refresh_secret';
-const accessExpires = process.env.JWT_ACCESS_EXPIRES || '15m';
-const refreshExpires = process.env.JWT_REFRESH_EXPIRES || '7d';
-
+/**
+ * Access tokens carry the role so route guards can read it without a DB hit,
+ * but `requireAuth` always re-reads the user, so a role change or deactivation
+ * takes effect on the next request rather than at token expiry.
+ */
 exports.generateTokens = (user) => {
-  const payload = {
-    userId: user.id,
-    role: user.role,
+  const payload = { userId: user.id, role: user.role };
+
+  return {
+    accessToken: jwt.sign(payload, config.jwt.accessSecret, {
+      expiresIn: config.jwt.accessExpires,
+    }),
+    refreshToken: jwt.sign(payload, config.jwt.refreshSecret, {
+      expiresIn: config.jwt.refreshExpires,
+    }),
   };
-
-  const accessToken = jwt.sign(payload, accessSecret, { expiresIn: accessExpires });
-  const refreshToken = jwt.sign(payload, refreshSecret, { expiresIn: refreshExpires });
-
-  return { accessToken, refreshToken };
 };
 
 exports.verifyAccessToken = (token) => {
   try {
-    return jwt.verify(token, accessSecret);
-  } catch (err) {
+    return jwt.verify(token, config.jwt.accessSecret);
+  } catch {
     return null;
   }
 };
 
 exports.verifyRefreshToken = (token) => {
   try {
-    return jwt.verify(token, refreshSecret);
-  } catch (err) {
+    return jwt.verify(token, config.jwt.refreshSecret);
+  } catch {
     return null;
   }
 };

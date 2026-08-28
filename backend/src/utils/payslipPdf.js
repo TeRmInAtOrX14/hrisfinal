@@ -136,8 +136,15 @@ function generatePayslipPdf(stream, payslip, company = { name: 'Brandigade', add
   const otherDeductions = payslip.otherDeductions || 0;
   const totalDeductions = absentsLatesDeduction + loansDeduction + otherDeductions;
   
-  // Formula: Net Payment = (Basic Salary + Total Additions) - Total Deductions
-  const netPayment = (basicSalary + totalAdditions) - totalDeductions;
+  // Net Payment = (Basic Salary + Total Additions) - Total Deductions.
+  //
+  // For a stored payslip the authoritative figure is the one payroll computed
+  // and saved; recomputing it here could disagree with the database, and the
+  // payroll engine floors net pay at zero while this expression can go negative.
+  // The fallback covers the manual/ad-hoc generator, which has no stored row.
+  const computedNet = (basicSalary + totalAdditions) - totalDeductions;
+  const netPayment =
+    typeof payslip.netPay === 'number' ? payslip.netPay : Math.max(0, computedNet);
 
   // ---------------- PAYMENTS SECTION ----------------
   drawSectionHeader('Payments');
