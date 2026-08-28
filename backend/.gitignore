@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+node_modules/
+
+# Generated payslip PDFs must never be committed.
+*.pdf
+dist/

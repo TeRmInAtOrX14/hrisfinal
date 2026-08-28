@@ -1,17 +1,26 @@
 const express = require('express');
-const router = express.Router();
-const employeeController = require('../controllers/employee');
+
+const controller = require('../controllers/employee');
+const validate = require('../middlewares/validate');
+const schemas = require('../schemas');
 const { requireAuth, requireRole } = require('../middlewares/auth');
 
-const adminRoles = ['Admin', 'CEO', 'COO'];
+const router = express.Router();
+const ADMIN = schemas.ADMIN_ROLES;
 
-// Employee Routes
-router.get('/', requireAuth, employeeController.getEmployees);
-router.get('/teams', requireAuth, employeeController.getTeams);
-router.get('/:id', requireAuth, employeeController.getEmployeeById);
-router.post('/', requireAuth, requireRole(adminRoles), employeeController.createEmployee);
-router.put('/:id', requireAuth, employeeController.updateEmployee);
-router.delete('/:id', requireAuth, requireRole(adminRoles), employeeController.deleteEmployee);
-router.post('/:id/terminate', requireAuth, requireRole(adminRoles), employeeController.terminateEmployee);
+router.use(requireAuth);
+
+// Static paths must precede '/:id' or 'teams' and 'org-chart' are swallowed by it.
+router.get('/teams', controller.getTeams);
+router.get('/org-chart', controller.getOrgChart);
+
+router.get('/', controller.getEmployees);
+router.get('/:id', controller.getEmployeeById);
+
+router.post('/', requireRole(ADMIN), validate(schemas.employee.create), controller.createEmployee);
+router.put('/:id', validate(schemas.employee.update), controller.updateEmployee);
+
+router.post('/:id/terminate', requireRole(ADMIN), controller.terminateEmployee);
+router.delete('/:id', requireRole(ADMIN), controller.deleteEmployee);
 
 module.exports = router;

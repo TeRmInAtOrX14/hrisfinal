@@ -1,15 +1,34 @@
 const express = require('express');
-const router = express.Router();
-const attendanceController = require('../controllers/attendance');
+
+const controller = require('../controllers/attendance');
+const validate = require('../middlewares/validate');
+const schemas = require('../schemas');
 const { requireAuth, requireRole } = require('../middlewares/auth');
 const { requireSyncToken } = require('../middlewares/syncAuth');
 
-const adminRoles = ['Admin', 'CEO', 'COO'];
+const router = express.Router();
+const ADMIN = schemas.ADMIN_ROLES;
 
-router.post('/punches', requireSyncToken, attendanceController.receivePunches);
-router.get('/', requireAuth, attendanceController.getAttendance);
-router.get('/summary', requireAuth, attendanceController.getAttendanceSummary);
-router.post('/sync', requireAuth, requireRole(adminRoles), attendanceController.syncAttendance);
-router.post('/manual', requireAuth, requireRole(adminRoles), attendanceController.manualPunch);
+// Machine-to-machine ingestion from the office sync agent. Authenticated by
+// x-sync-token, not a user session, so it sits above requireAuth.
+router.post(
+  '/punches',
+  requireSyncToken,
+  validate(schemas.attendance.punches),
+  controller.receivePunches
+);
+
+router.use(requireAuth);
+
+router.get('/', controller.getAttendance);
+router.get('/summary', controller.getAttendanceSummary);
+
+router.post('/sync', requireRole(ADMIN), controller.syncAttendance);
+router.post(
+  '/manual',
+  requireRole(ADMIN),
+  validate(schemas.attendance.manualPunch),
+  controller.manualPunch
+);
 
 module.exports = router;

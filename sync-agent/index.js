@@ -105,7 +105,7 @@ async function postPunches(punches) {
 }
 
 async function main() {
-  if (!API_URL)   fail('HRIS_API_URL is not set (e.g. https://api.brandigade.com/api)');
+  if (!API_URL)   fail('HRIS_API_URL is not set (e.g. https://hris.brandigade.com/api)');
   if (!TOKEN)     fail('SYNC_AGENT_TOKEN is not set — it must match the server value');
   if (!DEVICE_IP) fail('ZKTECO_IP is not set');
 

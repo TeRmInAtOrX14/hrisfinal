@@ -1,14 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import {
-  PiggyBank,
   Plus,
   X,
   User,
   Loader2
 } from 'lucide-react';
-import api from '../utils/api';
+import api, { session, apiError } from '../utils/api';
 import toast from 'react-hot-toast';
+import { isAdmin as isAdminRole } from '../utils/roles';
 
 export default function Loans() {
   const [activeTab, setActiveTab] = useState('my-loans');
@@ -17,8 +17,8 @@ export default function Loans() {
   const [requestModalOpen, setRequestModalOpen] = useState(false);
   const [reviewItem, setReviewItem] = useState(null);
 
-  const currentUser = JSON.parse(localStorage.getItem('user')) || { role: 'Employee' };
-  const isAdmin = ['Admin', 'CEO', 'COO'].includes(currentUser.role);
+  const currentUser = session.user || { role: 'Employee' };
+  const isAdmin = isAdminRole(currentUser);
   const { register, handleSubmit, reset } = useForm();
 
   const fetchLoans = async () => {
@@ -27,8 +27,8 @@ export default function Loans() {
       const query = activeTab === 'reviews' ? 'status=pending' : '';
       const res = await api.get(`/loans?${query}`);
       setRequests(res.data);
-    } catch (e) {
-      toast.error('Failed to load loans records');
+    } catch (err) {
+      toast.error(apiError(err, 'Failed to load loans records.'));
     } finally {
       setLoading(false);
     }
@@ -36,6 +36,7 @@ export default function Loans() {
 
   useEffect(() => {
     fetchLoans();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
   const handleCreateRequest = async (data) => {
@@ -46,7 +47,7 @@ export default function Loans() {
       reset();
       fetchLoans();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to submit loan request');
+      toast.error(apiError(err, 'Failed to submit loan request.'));
     }
   };
 
@@ -62,7 +63,7 @@ export default function Loans() {
       reset();
       fetchLoans();
     } catch (err) {
-      toast.error('Failed to submit loan review');
+      toast.error(apiError(err, 'Failed to submit loan review.'));
     }
   };
 
@@ -82,7 +83,7 @@ export default function Loans() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4">
         <div>
-          <h2 className="text-xl font-extrabold tracking-tight text-white font-display uppercase">Loans & Advances</h2>
+          <h2 className="text-xl font-extrabold tracking-tight text-brand-text font-display uppercase">Loans & Advances</h2>
           <p className="text-xs text-brand-text-soft mt-1">Submit salary advances or loans, and track monthly paycheck deduction schedules.</p>
         </div>
         
@@ -101,7 +102,7 @@ export default function Loans() {
           <button
             onClick={() => setActiveTab('my-loans')}
             className={`pb-3 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
-              activeTab === 'my-loans' ? 'border-brand-cyan text-white' : 'border-transparent text-brand-text-soft hover:text-white'
+              activeTab === 'my-loans' ? 'border-brand-cyan text-brand-text' : 'border-transparent text-brand-text-soft hover:text-brand-text'
             }`}
           >
             Loan Registry Log
@@ -109,7 +110,7 @@ export default function Loans() {
           <button
             onClick={() => setActiveTab('reviews')}
             className={`pb-3 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
-              activeTab === 'reviews' ? 'border-brand-cyan text-white' : 'border-transparent text-brand-text-soft hover:text-white'
+              activeTab === 'reviews' ? 'border-brand-cyan text-brand-text' : 'border-transparent text-brand-text-soft hover:text-brand-text'
             }`}
           >
             Pending Reviews Panel
@@ -138,7 +139,7 @@ export default function Loans() {
                   }`}>
                     {req.type === 'loan' ? 'Long-term Loan' : 'Salary Advance'}
                   </span>
-                  <p className="text-xl font-extrabold text-white font-display mt-2.5 font-mono">
+                  <p className="text-xl font-extrabold text-brand-text font-display mt-2.5 font-mono">
                     PKR {req.amount.toLocaleString()}
                   </p>
                 </div>
@@ -151,7 +152,7 @@ export default function Loans() {
                     <User className="w-3 h-3 text-brand-cyan" />
                   </div>
                   <div>
-                    <p className="text-[10px] font-bold text-white leading-none">{req.employee?.fullName}</p>
+                    <p className="text-[10px] font-bold text-brand-text leading-none">{req.employee?.fullName}</p>
                     <p className="text-[8px] text-brand-text-mute mt-0.5">{req.employee?.employeeCode}</p>
                   </div>
                 </div>
@@ -185,24 +186,24 @@ export default function Loans() {
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setRequestModalOpen(false)} />
           <div className="bg-brand-bg-elevated border border-brand-border rounded-2xl p-6 w-full max-w-md shadow-glow relative z-50 text-left">
             <div className="flex justify-between items-center border-b border-brand-border pb-3 mb-4">
-              <h3 className="text-sm font-extrabold text-white uppercase font-display">Request Advance or Loan</h3>
-              <button onClick={() => setRequestModalOpen(false)} className="p-1 rounded text-brand-text-soft hover:text-white cursor-pointer"><X className="w-4 h-4" /></button>
+              <h3 className="text-sm font-extrabold text-brand-text uppercase font-display">Request Advance or Loan</h3>
+              <button onClick={() => setRequestModalOpen(false)} className="p-1 rounded text-brand-text-soft hover:text-brand-text cursor-pointer"><X className="w-4 h-4" /></button>
             </div>
             <form onSubmit={handleSubmit(handleCreateRequest)} className="space-y-4">
               <div>
                 <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Request Type</label>
-                <select {...register('type', { required: true })} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none cursor-pointer">
+                <select {...register('type', { required: true })} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer">
                   <option value="advance_salary">Salary Advance (Short Term)</option>
                   <option value="loan">Company Loan (Long Term)</option>
                 </select>
               </div>
               <div>
                 <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Amount (PKR)</label>
-                <input type="number" {...register('amount', { required: true })} placeholder="e.g. 20000" className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none" />
+                <input type="number" {...register('amount', { required: true })} placeholder="e.g. 20000" className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none" />
               </div>
               <div>
                 <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Reason / Justification</label>
-                <textarea rows={3} {...register('reason', { required: true })} placeholder="Provide context..." className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none" />
+                <textarea rows={3} {...register('reason', { required: true })} placeholder="Provide context..." className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none" />
               </div>
               <button type="submit" className="w-full py-2.5 rounded-full bg-gradient-to-r from-brand-blue via-brand-violet to-brand-cyan text-brand-bg font-bold font-display text-xs cursor-pointer shadow-md shadow-brand-blue/15">Submit Request</button>
             </form>
@@ -216,18 +217,18 @@ export default function Loans() {
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setReviewItem(null)} />
           <div className="bg-brand-bg-elevated border border-brand-border rounded-2xl p-6 w-full max-w-md shadow-glow relative z-50 text-left">
             <div className="flex justify-between items-center border-b border-brand-border pb-3 mb-4">
-              <h3 className="text-sm font-extrabold text-white uppercase font-display">Review Request</h3>
-              <button onClick={() => setReviewItem(null)} className="p-1 rounded text-brand-text-soft hover:text-white cursor-pointer"><X className="w-4 h-4" /></button>
+              <h3 className="text-sm font-extrabold text-brand-text uppercase font-display">Review Request</h3>
+              <button onClick={() => setReviewItem(null)} className="p-1 rounded text-brand-text-soft hover:text-brand-text cursor-pointer"><X className="w-4 h-4" /></button>
             </div>
             <form onSubmit={handleSubmit(handleReview)} className="space-y-4">
               <div className="p-3.5 bg-brand-bg border border-brand-border rounded-xl space-y-1.5 text-xs text-brand-text-soft">
-                <p><span className="text-brand-text-mute">Applicant:</span> <span className="font-bold text-white">{reviewItem.employee?.fullName}</span></p>
-                <p><span className="text-brand-text-mute">Amount Requested:</span> <span className="font-extrabold text-white font-mono">PKR {reviewItem.amount.toLocaleString()}</span></p>
+                <p><span className="text-brand-text-mute">Applicant:</span> <span className="font-bold text-brand-text">{reviewItem.employee?.fullName}</span></p>
+                <p><span className="text-brand-text-mute">Amount Requested:</span> <span className="font-extrabold text-brand-text font-mono">PKR {reviewItem.amount.toLocaleString()}</span></p>
               </div>
 
               <div>
                 <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Action Status</label>
-                <select {...register('status', { required: true })} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none cursor-pointer">
+                <select {...register('status', { required: true })} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer">
                   <option value="approved">Approve Request</option>
                   <option value="rejected">Reject Request</option>
                 </select>
@@ -236,7 +237,7 @@ export default function Loans() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Repayment Month</label>
-                  <select {...register('repaymentMonth')} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none cursor-pointer">
+                  <select {...register('repaymentMonth')} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer">
                     {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
                       <option key={m} value={m}>{m}</option>
                     ))}
@@ -244,7 +245,7 @@ export default function Loans() {
                 </div>
                 <div>
                   <label className="block text-[10px] font-bold uppercase text-brand-text-soft mb-1.5">Repayment Year</label>
-                  <select {...register('repaymentYear')} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-white focus:outline-none cursor-pointer">
+                  <select {...register('repaymentYear')} className="w-full px-3.5 py-2.5 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer">
                     <option value="2026">2026</option>
                     <option value="2027">2027</option>
                   </select>

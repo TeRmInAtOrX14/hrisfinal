@@ -4,23 +4,12 @@ import {
   Users,
   Briefcase,
   TrendingUp,
-  FileText,
   Clock,
-  CheckCircle,
-  AlertCircle,
-  HelpCircle,
-  Plus,
-  Play,
   UserCheck,
-  Calendar,
-  DollarSign,
-  ShieldCheck,
   RefreshCw,
   Sliders,
   AlertTriangle,
-  Award,
-  Zap,
-  TrendingDown
+  Zap
 } from 'lucide-react';
 import {
   AreaChart,
@@ -37,15 +26,11 @@ import {
   Pie,
   Cell
 } from 'recharts';
-import api from '../utils/api';
+import api, { apiError } from '../utils/api';
 import toast from 'react-hot-toast';
 import { useTheme } from '../utils/themeContext';
 
 const COLORS = ['#3e6cf6', '#8b5cf6', '#22d3ee', '#34d399', '#f5b942', '#ef4444'];
-const MONTH_NAMES = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December'
-];
 
 export default function DigitalTwin() {
   const { isDark } = useTheme();
@@ -64,7 +49,6 @@ export default function DigitalTwin() {
   const [halfdayRequests, setHalfdayRequests] = useState([]);
   const [wfhRequests, setWfhRequests] = useState([]);
   const [loanRequests, setLoanRequests] = useState([]);
-  const [payrollRuns, setPayrollRuns] = useState([]);
   const [campaignDetails, setCampaignDetails] = useState({});
   const [loading, setLoading] = useState(true);
 
@@ -73,7 +57,6 @@ export default function DigitalTwin() {
   const [simAbsences, setSimAbsences] = useState(0); // overall additional absences
   const [simCampaignSdrDiffs, setSimCampaignSdrDiffs] = useState({}); // campaignId -> added SDRs
   const [simShowupPercentDiffs, setSimShowupPercentDiffs] = useState({}); // campaignId -> percent increase in showups
-  const [simTLReassignments, setSimTLReassignments] = useState({}); // campaignId -> reassigned TL employeeId
 
   // Load Data
   const fetchData = async () => {
@@ -86,7 +69,6 @@ export default function DigitalTwin() {
         halfdayRes,
         wfhRes,
         loanRes,
-        payrollRes
       ] = await Promise.all([
         api.get('/employees'),
         api.get('/campaigns'),
@@ -94,7 +76,6 @@ export default function DigitalTwin() {
         api.get('/requests/halfday'),
         api.get('/requests/wfh'),
         api.get('/loans'),
-        api.get('/payroll/runs')
       ]);
 
       setEmployees(empRes.data);
@@ -103,7 +84,6 @@ export default function DigitalTwin() {
       setHalfdayRequests(halfdayRes.data);
       setWfhRequests(wfhRes.data);
       setLoanRequests(loanRes.data);
-      setPayrollRuns(payrollRes.data);
 
       // Fetch last 30 days of attendance
       const today = new Date();
@@ -123,7 +103,7 @@ export default function DigitalTwin() {
             const res = await api.get(`/campaigns/${camp.id}/dashboard`);
             detailsMap[camp.id] = res.data;
           } catch (e) {
-            console.error(`Failed to load dashboard for campaign ${camp.id}`);
+            console.error(`Campaign dashboard ${camp.id}:`, apiError(e));
           }
         })
       );
@@ -184,11 +164,6 @@ export default function DigitalTwin() {
   // Team Leads list & count
   const teamLeadsCount = activeEmployees.filter(e => e.designation?.toLowerCase().includes('lead') || e.user?.role === 'Team Lead').length;
 
-  // Latest Payroll Run status
-  const latestPayrollRun = payrollRuns[0];
-  const payrollStatus = latestPayrollRun 
-    ? `${MONTH_NAMES[latestPayrollRun.periodMonth - 1]} ${latestPayrollRun.periodYear} (${latestPayrollRun.status.toUpperCase()})`
-    : 'NO RUNS';
 
   // ---------------------------------------------------------------------------
   // Simulation calculations
@@ -375,14 +350,6 @@ export default function DigitalTwin() {
     };
   });
 
-  // 4. Commission Distribution Chart Data
-  const commissionDistributionData = activeCampaigns.map(camp => {
-    const detail = campaignDetails[camp.id];
-    return {
-      name: camp.name,
-      value: detail?.stats?.commissionPaid || 0
-    };
-  }).filter(d => d.value > 0);
 
   // 5. Performance Leaderboards
   let topPerformingCampaign = 'None';
@@ -486,7 +453,7 @@ export default function DigitalTwin() {
             <div className="flex items-center gap-3">
               <Zap className="w-5 h-5 text-brand-cyan animate-pulse" />
               <div className="text-left">
-                <p className="text-xs font-extrabold text-white uppercase tracking-wider font-display">Simulation Mode Active</p>
+                <p className="text-xs font-extrabold text-brand-text uppercase tracking-wider font-display">Simulation Mode Active</p>
                 <p className="text-[10px] text-brand-text-soft">Visualizing projected operational impacts. Database changes are completely disabled.</p>
               </div>
             </div>
@@ -504,7 +471,7 @@ export default function DigitalTwin() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4">
         <div>
-          <h2 className="text-xl font-extrabold tracking-tight text-white font-display uppercase flex items-center gap-2">
+          <h2 className="text-xl font-extrabold tracking-tight text-brand-text font-display uppercase flex items-center gap-2">
             <Sliders className="w-5 h-5 text-brand-cyan" />
             Digital Twin Overview
           </h2>
@@ -513,7 +480,7 @@ export default function DigitalTwin() {
         <div className="flex gap-2">
           <button
             onClick={fetchData}
-            className="p-2.5 rounded-full border border-brand-border text-brand-text-soft hover:text-white hover:border-brand-blue-soft transition-colors cursor-pointer"
+            className="p-2.5 rounded-full border border-brand-border text-brand-text-soft hover:text-brand-text hover:border-brand-blue-soft transition-colors cursor-pointer"
             title="Refresh Live Data"
           >
             <RefreshCw className="w-4 h-4" />
@@ -529,7 +496,7 @@ export default function DigitalTwin() {
             <span className="text-[9px] font-bold uppercase tracking-wider">Total Headcount</span>
             <Users className="w-4 h-4 text-brand-blue" />
           </div>
-          <p className="text-2xl font-extrabold text-white font-display">{totalEmployeesCount}</p>
+          <p className="text-2xl font-extrabold text-brand-text font-display">{totalEmployeesCount}</p>
           <span className="text-[8px] text-brand-text-mute mt-1 font-mono uppercase">Active Profiles</span>
         </div>
 
@@ -540,7 +507,7 @@ export default function DigitalTwin() {
             <UserCheck className="w-4 h-4 text-brand-green" />
           </div>
           <div className="flex items-baseline gap-1.5">
-            <p className="text-2xl font-extrabold text-white font-display">{simMode ? projectedPresent : normalPresentCount}</p>
+            <p className="text-2xl font-extrabold text-brand-text font-display">{simMode ? projectedPresent : normalPresentCount}</p>
             {simMode && projectedPresent !== normalPresentCount && (
               <span className={`text-[10px] font-bold ${projectedPresent < normalPresentCount ? 'text-brand-red' : 'text-brand-green'}`}>
                 {projectedPresent < normalPresentCount ? '↓' : '↑'}
@@ -557,7 +524,7 @@ export default function DigitalTwin() {
             <TrendingUp className="w-4 h-4 text-brand-cyan" />
           </div>
           <div className="flex items-baseline gap-1.5">
-            <p className="text-2xl font-extrabold text-white font-display">
+            <p className="text-2xl font-extrabold text-brand-text font-display">
               {(simMode ? projectedAttendanceRate : normalAttendanceRate).toFixed(1)}%
             </p>
             {simMode && projectedAttendanceRate !== normalAttendanceRate && (
@@ -575,7 +542,7 @@ export default function DigitalTwin() {
             <span className="text-[9px] font-bold uppercase tracking-wider">Active Campaigns</span>
             <Briefcase className="w-4 h-4 text-brand-violet" />
           </div>
-          <p className="text-2xl font-extrabold text-white font-display">{activeCampaignsCount}</p>
+          <p className="text-2xl font-extrabold text-brand-text font-display">{activeCampaignsCount}</p>
           <span className="text-[8px] text-brand-text-mute mt-1 font-mono uppercase">Led by {teamLeadsCount} TLs</span>
         </div>
 
@@ -585,7 +552,7 @@ export default function DigitalTwin() {
             <span className="text-[9px] font-bold uppercase tracking-wider">Pending Requests</span>
             <AlertTriangle className="w-4 h-4 text-brand-amber" />
           </div>
-          <p className="text-2xl font-extrabold text-white font-display">{totalPendingRequests}</p>
+          <p className="text-2xl font-extrabold text-brand-text font-display">{totalPendingRequests}</p>
           <span className="text-[8px] text-brand-text-mute mt-1 font-mono uppercase">Leaves, WFH & Loans</span>
         </div>
       </div>
@@ -598,7 +565,7 @@ export default function DigitalTwin() {
           
           {/* Campaign Twin */}
           <div className="p-6 rounded-2xl glass-panel space-y-4">
-            <h3 className="text-sm font-extrabold text-white uppercase tracking-wider font-display">Campaign Twin State</h3>
+            <h3 className="text-sm font-extrabold text-brand-text uppercase tracking-wider font-display">Campaign Twin State</h3>
             
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {activeCampaigns.map(camp => {
@@ -622,7 +589,7 @@ export default function DigitalTwin() {
                   <div key={camp.id} className="p-4 rounded-xl bg-brand-bg-soft/50 border border-brand-border space-y-3">
                     <div className="flex justify-between items-start">
                       <div>
-                        <h4 className="text-xs font-bold text-white uppercase tracking-wider">{camp.name}</h4>
+                        <h4 className="text-xs font-bold text-brand-text uppercase tracking-wider">{camp.name}</h4>
                         <p className="text-[9px] text-brand-text-mute mt-0.5">Lead: {leadName}</p>
                       </div>
                       <span className={`px-2 py-0.5 rounded-full text-[8px] font-bold border ${health.color}`}>
@@ -633,7 +600,7 @@ export default function DigitalTwin() {
                     <div className="grid grid-cols-2 gap-2 text-[10px] font-mono text-brand-text-soft border-t border-brand-border/30 pt-2.5">
                       <div>
                         <span className="block text-[8px] uppercase text-brand-text-mute">SDR size</span>
-                        <strong className="text-white">{activeSdrs} SDRs</strong>
+                        <strong className="text-brand-text">{activeSdrs} SDRs</strong>
                         {sdrDiff !== 0 && (
                           <span className={`text-[8px] ml-1 ${sdrDiff > 0 ? 'text-brand-green' : 'text-brand-red'}`}>
                             ({sdrDiff > 0 ? `+${sdrDiff}` : sdrDiff})
@@ -642,7 +609,7 @@ export default function DigitalTwin() {
                       </div>
                       <div>
                         <span className="block text-[8px] uppercase text-brand-text-mute">Monthly Showups</span>
-                        <strong className="text-white">{Math.round(simulatedShowups)}</strong>
+                        <strong className="text-brand-text">{Math.round(simulatedShowups)}</strong>
                         {simMode && Math.round(simulatedShowups) !== baseShowups && (
                           <span className="text-[8px] ml-1 text-brand-green">
                             (Proj)
@@ -658,7 +625,7 @@ export default function DigitalTwin() {
 
           {/* Attendance Trends */}
           <div className="p-6 rounded-2xl glass-panel space-y-4">
-            <h3 className="text-sm font-extrabold text-white uppercase tracking-wider font-display">Attendance Twin Trends</h3>
+            <h3 className="text-sm font-extrabold text-brand-text uppercase tracking-wider font-display">Attendance Twin Trends</h3>
             <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={attendanceTrendData}>
@@ -715,7 +682,7 @@ export default function DigitalTwin() {
           {/* Simulation Panel */}
           <div className="p-6 rounded-2xl glass-panel-strong border-brand-blue/30 space-y-4">
             <div className="flex justify-between items-center pb-2 border-b border-brand-border/40">
-              <h3 className="text-sm font-extrabold text-white uppercase tracking-wider font-display flex items-center gap-1.5">
+              <h3 className="text-sm font-extrabold text-brand-text uppercase tracking-wider font-display flex items-center gap-1.5">
                 <Sliders className="w-4 h-4 text-brand-cyan" />
                 Operational Simulation
               </h3>
@@ -764,7 +731,7 @@ export default function DigitalTwin() {
                       >
                         -
                       </button>
-                      <span className="font-mono font-bold text-white w-6 text-center">{simCampaignSdrDiffs[camp.id] || 0}</span>
+                      <span className="font-mono font-bold text-brand-text w-6 text-center">{simCampaignSdrDiffs[camp.id] || 0}</span>
                       <button
                         onClick={() => {
                           const currentVal = simCampaignSdrDiffs[camp.id] || 0;
@@ -857,13 +824,13 @@ export default function DigitalTwin() {
 
           {/* Performance Twin: Leaders & Rankings */}
           <div className="p-6 rounded-2xl glass-panel space-y-4">
-            <h3 className="text-sm font-extrabold text-white uppercase tracking-wider font-display">Performance Twin</h3>
+            <h3 className="text-sm font-extrabold text-brand-text uppercase tracking-wider font-display">Performance Twin</h3>
             
             {/* Top performing indicators */}
             <div className="p-3 bg-brand-bg-soft/40 border border-brand-border rounded-xl space-y-2 text-xs">
               <div className="flex justify-between">
                 <span className="text-brand-text-soft">Top Campaign:</span>
-                <span className="font-bold text-white">{topPerformingCampaign}</span>
+                <span className="font-bold text-brand-text">{topPerformingCampaign}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-brand-text-soft">Top Team Lead:</span>
@@ -878,7 +845,7 @@ export default function DigitalTwin() {
                 {topSDRs.map((sdr, idx) => (
                   <div key={idx} className="flex justify-between items-center text-xs p-2 bg-brand-bg-soft/20 border border-brand-border rounded-lg">
                     <div className="min-w-0">
-                      <p className="font-bold text-white truncate">{sdr.fullName}</p>
+                      <p className="font-bold text-brand-text truncate">{sdr.fullName}</p>
                       <p className="text-[8px] text-brand-text-mute uppercase">{sdr.campaignName}</p>
                     </div>
                     <div className="text-right">
@@ -899,7 +866,7 @@ export default function DigitalTwin() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Workforce Status Distribution Pie Chart */}
         <div className="p-6 rounded-2xl glass-panel space-y-4">
-          <h3 className="text-sm font-extrabold text-white uppercase tracking-wider font-display">Workforce Distribution</h3>
+          <h3 className="text-sm font-extrabold text-brand-text uppercase tracking-wider font-display">Workforce Distribution</h3>
           <div className="h-64 w-full flex justify-center items-center">
             {workforcePieData.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
@@ -929,7 +896,7 @@ export default function DigitalTwin() {
 
         {/* Campaign Showups Comparison Bar Chart */}
         <div className="p-6 rounded-2xl glass-panel space-y-4">
-          <h3 className="text-sm font-extrabold text-white uppercase tracking-wider font-display">Campaign Show-ups Comparison</h3>
+          <h3 className="text-sm font-extrabold text-brand-text uppercase tracking-wider font-display">Campaign Show-ups Comparison</h3>
           <div className="h-64 w-full">
             {campaignPerformanceData.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">

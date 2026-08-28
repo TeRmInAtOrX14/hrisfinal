@@ -1,62 +1,88 @@
-const { PrismaClient } = require('@prisma/client');
-const bcrypt = require('bcryptjs');
 require('dotenv').config();
 
-const prisma = new PrismaClient();
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 
+const prisma = require('../lib/prisma');
+
+/**
+ * Bootstrap the first administrator account.
+ *
+ * The previous version fell back to a hard-coded password ('Brandigade1') and
+ * set `mustChangePassword: false`, so a fresh deployment shipped with a known
+ * admin credential that the system never asked anyone to change. If
+ * ADMIN_PASSWORD is not set we now generate a strong random one, print it once,
+ * and require it to be changed at first sign-in.
+ */
 async function main() {
-  console.log('[Seed] Initializing production database environment...');
+  const email = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+  const name = process.env.ADMIN_NAME || 'System Administrator';
 
-  const adminEmail = process.env.ADMIN_EMAIL || 'kashan.ahmed@brandigade.com';
-  const adminPassword = process.env.ADMIN_PASSWORD || 'Brandigade1';
-  const adminName = process.env.ADMIN_NAME || 'Kashan Ahmed';
+  if (!email) {
+    console.error('[Seed] ADMIN_EMAIL is required. Set it in backend/.env and run again.');
+    process.exit(1);
+  }
 
-  // 1. Check if Super Admin account exists
-  let adminUser = await prisma.user.findUnique({
-    where: { email: adminEmail }
+  const existing = await prisma.user.findFirst({
+    where: { email: { equals: email, mode: 'insensitive' } },
   });
 
-  if (!adminUser) {
-    console.log(`[Seed] Creating Super Admin account (${adminEmail})...`);
-    const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(adminPassword, salt);
+  if (existing) {
+    console.log(`[Seed] Administrator ${email} already exists — nothing to do.`);
+    return;
+  }
 
-    adminUser = await prisma.user.create({
+  const provided = process.env.ADMIN_PASSWORD;
+  const generated = !provided;
+  // Base64url of 18 bytes: 24 characters, satisfies the password policy.
+  const password = provided || crypto.randomBytes(18).toString('base64url');
+
+  const passwordHash = await bcrypt.hash(password, await bcrypt.genSalt(12));
+
+  await prisma.$transaction(async (tx) => {
+    const user = await tx.user.create({
       data: {
-        email: adminEmail,
+        email,
         passwordHash,
         role: 'Admin',
-        mustChangePassword: false
-      }
+        // Even an operator-chosen password must be replaced by the human who
+        // will actually use the account.
+        mustChangePassword: true,
+      },
     });
 
-    await prisma.employee.create({
+    await tx.employee.create({
       data: {
-        userId: adminUser.id,
-        employeeCode: 'EMP-001',
-        fullName: adminName,
+        userId: user.id,
+        employeeCode: process.env.ADMIN_EMPLOYEE_CODE || 'EMP-001',
+        fullName: name,
         designation: 'Administrator',
-        zkUserId: '1',
         status: 'active',
         baseSalary: 0,
         currency: 'PKR',
         shiftStart: process.env.OFFICE_START_TIME || '09:30',
-        shiftEnd: '18:30'
-      }
+        shiftEnd: process.env.OFFICE_END_TIME || '18:30',
+      },
     });
+  });
 
-    console.log(`[Seed] Super Admin created successfully.`);
+  console.log('\n' + '='.repeat(64));
+  console.log('[Seed] Administrator account created.');
+  console.log(`       Email:    ${email}`);
+  if (generated) {
+    console.log(`       Password: ${password}`);
+    console.log('\n       This password is shown once and is not stored anywhere else.');
   } else {
-    console.log(`[Seed] Super Admin account (${adminEmail}) is already configured.`);
+    console.log('       Password: (the ADMIN_PASSWORD you configured)');
   }
-
-  console.log('[Seed] Clean database state ready for real employee data import.');
+  console.log('       You will be asked to change it at first sign-in.');
+  console.log('='.repeat(64) + '\n');
 }
 
 main()
-  .catch((e) => {
-    console.error('[Seed] Error during seeding:', e);
-    process.exit(1);
+  .catch((err) => {
+    console.error('[Seed] Failed:', err.message);
+    process.exitCode = 1;
   })
   .finally(async () => {
     await prisma.$disconnect();

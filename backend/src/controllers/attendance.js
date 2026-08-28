@@ -1,77 +1,49 @@
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../lib/prisma');
 const { syncZKTeco } = require('../utils/zkteco');
 const { processBatchPunches } = require('../utils/punchIngest');
 const { logAudit } = require('../utils/audit');
+const { resolveEmployeeFilter } = require('../utils/scope');
+const {
+  toDateOnly,
+  computeDayMetrics,
+  monthBounds,
+} = require('../utils/attendanceTime');
 
-const prisma = new PrismaClient();
+const EMPLOYEE_SELECT = {
+  select: { id: true, fullName: true, employeeCode: true, designation: true },
+};
 
 exports.getAttendance = async (req, res, next) => {
   try {
     const { startDate, endDate, employeeId } = req.query;
 
+    const scope = await resolveEmployeeFilter(req.user, employeeId);
+    if (!scope.ok) {
+      return res.status(scope.status).json({ error: scope.error });
+    }
+
     const where = {};
-    
-    // Date Range Filter
+    if (scope.filter !== undefined) where.employeeId = scope.filter;
+
     if (startDate || endDate) {
       where.date = {};
       if (startDate) {
-        where.date.gte = new Date(startDate);
+        const from = toDateOnly(startDate);
+        if (from) where.date.gte = from;
       }
       if (endDate) {
-        where.date.lte = new Date(endDate);
-      }
-    }
-
-    if (['Employee', 'SDR'].includes(req.user.role)) {
-      // Regular employees and SDRs can only see their own attendance
-      if (!req.user.employee) {
-        return res.status(400).json({ error: 'No employee profile linked to user.' });
-      }
-      where.employeeId = req.user.employee.id;
-    } else if (req.user.role === 'Team Lead') {
-      // Find active campaigns this TL leads
-      const ledCampaigns = await prisma.campaignMember.findMany({
-        where: { employeeId: req.user.employee?.id, role: 'team_lead', status: 'active' },
-        select: { campaignId: true }
-      });
-      const campaignIds = ledCampaigns.map(c => c.campaignId);
-
-      // Find active SDRs in these campaigns
-      const sdrs = await prisma.campaignMember.findMany({
-        where: { campaignId: { in: campaignIds }, status: 'active' },
-        select: { employeeId: true }
-      });
-      const sdrIds = sdrs.map(s => s.employeeId);
-      if (req.user.employee?.id) {
-        sdrIds.push(req.user.employee.id);
-      }
-
-      if (employeeId) {
-        if (!sdrIds.includes(employeeId)) {
-          return res.status(403).json({ error: 'Access denied.' });
-        }
-        where.employeeId = employeeId;
-      } else {
-        where.employeeId = { in: sdrIds };
-      }
-    } else {
-      // Admins/Directors can filter by any employee
-      if (employeeId) {
-        where.employeeId = employeeId;
+        const to = toDateOnly(endDate);
+        if (to) where.date.lte = to;
       }
     }
 
     const records = await prisma.attendance.findMany({
       where,
-      include: {
-        employee: {
-          select: { id: true, fullName: true, employeeCode: true, designation: true }
-        }
-      },
-      orderBy: [
-        { date: 'desc' },
-        { checkIn: 'desc' }
-      ]
+      include: { employee: EMPLOYEE_SELECT },
+      orderBy: [{ date: 'desc' }, { checkIn: 'desc' }],
+      // A full history for a large team is thousands of rows the table never
+      // shows; cap it so one page load cannot pull the entire dataset.
+      take: 2000,
     });
 
     res.json(records);
@@ -83,81 +55,58 @@ exports.getAttendance = async (req, res, next) => {
 exports.getAttendanceSummary = async (req, res, next) => {
   try {
     const { employeeId, year, month } = req.query;
-    
+
     if (!employeeId || !year || !month) {
       return res.status(400).json({ error: 'employeeId, year, and month are required' });
     }
 
-    // RBAC check: standard Employees and SDRs can only see their own attendance summary
-    if (['Employee', 'SDR'].includes(req.user.role) && req.user.employee?.id !== employeeId) {
-      return res.status(403).json({ error: 'Access denied.' });
+    const scope = await resolveEmployeeFilter(req.user, employeeId);
+    if (!scope.ok) {
+      return res.status(scope.status).json({ error: scope.error });
     }
 
-    // RBAC check: Team Leads can only see their own summary or the summary of employees on their led campaigns
-    if (req.user.role === 'Team Lead' && req.user.employee?.id !== employeeId) {
-      const ledCampaigns = await prisma.campaignMember.findMany({
-        where: { employeeId: req.user.employee?.id, role: 'team_lead', status: 'active' },
-        select: { campaignId: true }
-      });
-      const campaignIds = ledCampaigns.map(c => c.campaignId);
-      
-      const isMemberOfLedCampaign = await prisma.campaignMember.findFirst({
-        where: {
-          employeeId,
-          campaignId: { in: campaignIds },
-          status: 'active'
-        }
-      });
-
-      if (!isMemberOfLedCampaign) {
-        return res.status(403).json({ error: 'Access denied.' });
-      }
-    }
-
-    const startOfMonth = new Date(Date.UTC(parseInt(year), parseInt(month) - 1, 1));
-    const endOfMonth = new Date(Date.UTC(parseInt(year), parseInt(month), 0));
+    const { start, end, daysInPeriod } = monthBounds(year, month);
 
     const records = await prisma.attendance.findMany({
-      where: {
-        employeeId,
-        date: {
-          gte: startOfMonth,
-          lte: endOfMonth
-        }
-      }
+      where: { employeeId, date: { gte: start, lte: end } },
     });
 
-    // Compute metrics
-    let present = 0;
-    let lateCount = 0;
-    let totalLateMinutes = 0;
-    let halfDays = 0;
-    let leaves = 0;
-    let overtimeMinutes = 0;
-
-    records.forEach(rec => {
-      if (rec.status === 'present') present++;
-      if (rec.status === 'half_day') halfDays++;
-      if (rec.status === 'leave') leaves++;
-      if (rec.late > 0) {
-        lateCount++;
-        totalLateMinutes += rec.late;
-      }
-      overtimeMinutes += rec.overtime;
-    });
-
-    res.json({
+    const summary = {
       employeeId,
-      year: parseInt(year),
-      month: parseInt(month),
-      present,
-      halfDays,
-      leaves,
-      lateCount,
-      totalLateMinutes,
-      overtimeMinutes,
-      totalRecords: records.length
-    });
+      year: Number(year),
+      month: Number(month),
+      daysInPeriod,
+      present: 0,
+      halfDays: 0,
+      leaves: 0,
+      wfh: 0,
+      absent: 0,
+      lateCount: 0,
+      totalLateMinutes: 0,
+      overtimeMinutes: 0,
+      earlyDepartureMinutes: 0,
+      totalRecords: records.length,
+    };
+
+    for (const rec of records) {
+      if (rec.status === 'present') summary.present++;
+      else if (rec.status === 'half_day') summary.halfDays++;
+      else if (rec.status === 'leave') summary.leaves++;
+      else if (rec.status === 'wfh') summary.wfh++;
+      else if (rec.status === 'absent') summary.absent++;
+
+      if (rec.late > 0) {
+        summary.lateCount++;
+        summary.totalLateMinutes += rec.late;
+      }
+      summary.overtimeMinutes += rec.overtime;
+      summary.earlyDepartureMinutes += rec.earlyDeparture;
+    }
+
+    // Days actually worked, counting a half-day as half.
+    summary.daysWorked = summary.present + summary.wfh + summary.halfDays * 0.5;
+
+    res.json(summary);
   } catch (err) {
     next(err);
   }
@@ -166,7 +115,6 @@ exports.getAttendanceSummary = async (req, res, next) => {
 exports.syncAttendance = async (req, res, next) => {
   try {
     const result = await syncZKTeco();
-    
     await logAudit(req.user.id, 'SYNC_ZKTECO_ATTENDANCE', 'Attendance', null, result);
     res.json(result);
   } catch (err) {
@@ -174,82 +122,79 @@ exports.syncAttendance = async (req, res, next) => {
   }
 };
 
+/**
+ * Admin override for a single employee-day.
+ *
+ * The check-out the admin entered was previously parsed and then thrown away:
+ * both the create and update branches wrote `checkOut: null` unconditionally,
+ * and zeroed overtime and early departure. Those values are now stored, and the
+ * derived minutes are recomputed from the employee's own shift.
+ */
 exports.manualPunch = async (req, res, next) => {
   try {
     const { employeeId, date, status, checkIn, checkOut, note } = req.body;
 
-    if (!employeeId || !date || !status) {
-      return res.status(400).json({ error: 'employeeId, date, and status are required' });
+    const employee = await prisma.employee.findUnique({ where: { id: employeeId } });
+    if (!employee) {
+      return res.status(404).json({ error: 'Employee not found' });
     }
 
-    const dateObj = new Date(date);
-    const dateMidnight = new Date(Date.UTC(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate()));
+    const dateMidnight = toDateOnly(date);
+    if (!dateMidnight) {
+      return res.status(400).json({ error: 'Invalid date' });
+    }
 
     const checkInDate = checkIn ? new Date(checkIn) : null;
     const checkOutDate = checkOut ? new Date(checkOut) : null;
 
-    // Calculate late minutes if check-in is manual
-    let lateMins = 0;
-    if (checkInDate) {
-      const emp = await prisma.employee.findUnique({ where: { id: employeeId } });
-      const shiftStart = emp?.shiftStart || '09:30';
-      const [sh, sm] = shiftStart.split(':').map(Number);
-      const shiftStartMins = sh * 60 + sm;
-      const checkInMins = checkInDate.getHours() * 60 + checkInDate.getMinutes();
-      const diff = checkInMins - shiftStartMins;
-      const grace = emp?.graceMinutes !== undefined ? emp.graceMinutes : 15;
-      if (diff > grace) {
-        lateMins = diff;
-      }
-    }
+    // Leave and WFH days carry no lateness or overtime.
+    const isOffDay = status === 'leave' || status === 'wfh' || status === 'holiday';
+    const metrics = isOffDay
+      ? { late: 0, earlyDeparture: 0, overtime: 0 }
+      : computeDayMetrics(employee, checkInDate, checkOutDate);
+
+    const payload = {
+      status,
+      checkIn: checkInDate,
+      checkOut: checkOutDate,
+      ...metrics,
+      note: note || null,
+    };
 
     const record = await prisma.attendance.upsert({
-      where: {
-        employeeId_date: {
-          employeeId,
-          date: dateMidnight
-        }
-      },
-      create: {
-        employeeId,
-        date: dateMidnight,
-        status,
-        checkIn: checkInDate,
-        checkOut: null,
-        earlyDeparture: 0,
-        overtime: 0,
-        late: lateMins,
-        note
-      },
-      update: {
-        status,
-        checkIn: checkInDate,
-        checkOut: null,
-        earlyDeparture: 0,
-        overtime: 0,
-        late: lateMins,
-        note
-      }
+      where: { employeeId_date: { employeeId, date: dateMidnight } },
+      create: { employeeId, date: dateMidnight, ...payload },
+      update: payload,
     });
 
-    await logAudit(req.user.id, 'MANUAL_ATTENDANCE_PUNCH', 'Attendance', record.id, { status, date });
+    await logAudit(req.user.id, 'MANUAL_ATTENDANCE_PUNCH', 'Attendance', record.id, {
+      employeeId,
+      date,
+      status,
+    });
+
     res.json(record);
   } catch (err) {
     next(err);
   }
 };
 
+/** Ingestion endpoint for the office-side sync agent (x-sync-token auth). */
 exports.receivePunches = async (req, res, next) => {
   try {
     const { punches } = req.body;
-    if (!Array.isArray(punches)) {
-      return res.status(400).json({ error: 'Payload must contain a "punches" array.' });
+    const result = await processBatchPunches(punches);
+
+    if (result.unmatched.length > 0) {
+      console.warn(
+        `[Punch Ingest] ${result.unmatched.length} unmatched device id(s): ${result.unmatched
+          .slice(0, 20)
+          .join(', ')}`
+      );
     }
 
-    const result = await processBatchPunches(punches);
     res.json(result);
   } catch (err) {
     next(err);
   }
 };
-

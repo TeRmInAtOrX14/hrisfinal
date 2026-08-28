@@ -1,34 +1,65 @@
 const express = require('express');
-const router = express.Router();
-const campaignController = require('../controllers/campaign');
+
+const controller = require('../controllers/campaign');
+const validate = require('../middlewares/validate');
+const schemas = require('../schemas');
 const { requireAuth, requireRole } = require('../middlewares/auth');
 
-const adminRoles = ['Admin', 'CEO', 'COO'];
+const router = express.Router();
+const ADMIN = schemas.ADMIN_ROLES;
 
-// Campaigns CRUD
-router.get('/', requireAuth, campaignController.getCampaigns);
-router.post('/', requireAuth, requireRole(adminRoles), campaignController.createCampaign);
-router.put('/:id', requireAuth, requireRole(adminRoles), campaignController.updateCampaign);
-router.delete('/:id', requireAuth, requireRole(adminRoles), campaignController.deleteCampaign);
-router.post('/:id/duplicate', requireAuth, requireRole(adminRoles), campaignController.duplicateCampaign);
+router.use(requireAuth);
 
-// Member Assignments & Transfers
-router.post('/:id/members', requireAuth, requireRole(adminRoles), campaignController.assignMember);
-router.delete('/:id/members/:employeeId', requireAuth, requireRole(adminRoles), campaignController.unassignMember);
-router.put('/:id/members/:employeeId/status', requireAuth, requireRole(adminRoles), campaignController.toggleMemberStatus);
+// --- Commission structures -------------------------------------------------
+// '/structures/:id' must be declared before '/:campaignId/structures', or
+// Express matches 'structures' as a campaignId.
+router.put('/structures/:id', requireRole(ADMIN), validate(schemas.campaign.structure), controller.updateStructure);
+router.delete('/structures/:id', requireRole(ADMIN), controller.deleteStructure);
+router.post('/structures/:id/activate', requireRole(ADMIN), controller.activateStructure);
 
-// Commission Structure & Slabs CRUD
-router.get('/:campaignId/structures', requireAuth, campaignController.getStructures);
-router.post('/:campaignId/structures', requireAuth, requireRole(adminRoles), campaignController.createStructure);
-router.put('/structures/:id', requireAuth, requireRole(adminRoles), campaignController.updateStructure);
-router.delete('/structures/:id', requireAuth, requireRole(adminRoles), campaignController.deleteStructure);
-router.post('/structures/:id/activate', requireAuth, requireRole(adminRoles), campaignController.activateStructure);
+router.post(
+  '/preview-commission',
+  validate(schemas.campaign.previewCommission),
+  controller.previewCommission
+);
 
-// Commission Preview Simulator
-router.post('/preview-commission', requireAuth, campaignController.previewCommission);
+router.post(
+  '/performance',
+  requireRole(ADMIN),
+  validate(schemas.campaign.performance),
+  controller.logPerformance
+);
 
-// Campaign Dashboard & Performance Logging
-router.get('/:id/dashboard', requireAuth, campaignController.getCampaignDashboard);
-router.post('/performance', requireAuth, requireRole(adminRoles), campaignController.logPerformance);
+// --- Campaigns -------------------------------------------------------------
+router.get('/', controller.getCampaigns);
+router.post('/', requireRole(ADMIN), validate(schemas.campaign.create), controller.createCampaign);
+router.put('/:id', requireRole(ADMIN), validate(schemas.campaign.update), controller.updateCampaign);
+router.delete('/:id', requireRole(ADMIN), controller.deleteCampaign);
+router.post('/:id/duplicate', requireRole(ADMIN), controller.duplicateCampaign);
+
+// Read access is scoped inside the controller to the caller's own campaigns.
+router.get('/:id/dashboard', controller.getCampaignDashboard);
+router.get('/:campaignId/structures', controller.getStructures);
+router.post(
+  '/:campaignId/structures',
+  requireRole(ADMIN),
+  validate(schemas.campaign.structure),
+  controller.createStructure
+);
+
+// --- Membership ------------------------------------------------------------
+router.post(
+  '/:id/members',
+  requireRole(ADMIN),
+  validate(schemas.campaign.assignMember),
+  controller.assignMember
+);
+router.delete('/:id/members/:employeeId', requireRole(ADMIN), controller.unassignMember);
+router.put(
+  '/:id/members/:employeeId/status',
+  requireRole(ADMIN),
+  validate(schemas.campaign.memberStatus),
+  controller.toggleMemberStatus
+);
 
 module.exports = router;

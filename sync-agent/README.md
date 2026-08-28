@@ -21,7 +21,7 @@ the device, and pushes the punches out to the HRIS.
 ```
   ZKTeco device            Office PC                     Namecheap
   192.168.1.201   ──────►  sync agent   ──── HTTPS ────►  HRIS
-  (office LAN)             (this guide)                   (api.brandigade.com)
+  (office LAN)             (this guide)                   (hris.brandigade.com)
 ```
 
 **Without this, attendance will not appear in the HRIS at all.** Everything else
@@ -122,7 +122,7 @@ Open `.env` in Notepad and fill in:
 
 | Setting | What to put |
 |---|---|
-| `HRIS_API_URL` | `https://api.brandigade.com/api` — must end in `/api` |
+| `HRIS_API_URL` | `https://hris.brandigade.com/api` — must end in `/api` |
 | `SYNC_AGENT_TOKEN` | The long secret from the server (see below) |
 | `ZKTECO_IP` | The device address from Step 1 |
 | `ZKTECO_PORT` | `4370` unless your device differs |
@@ -163,7 +163,7 @@ Expected output:
 [2026-08-11T...] Probing device at 192.168.1.201:4370 ...
 [2026-08-11T...] Connected to device.
 [2026-08-11T...] Device returned 648 total punch records.
-[2026-08-11T...] Sending 214 punches to https://api.brandigade.com/api ...
+[2026-08-11T...] Sending 214 punches to https://hris.brandigade.com/api ...
 [2026-08-11T...] Batch 1: sent 214, synced 198, skipped 16
 [2026-08-11T...] Done. Records written: 198, skipped (unknown device users): 16
 ```

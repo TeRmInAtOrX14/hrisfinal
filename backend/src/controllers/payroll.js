@@ -1,324 +1,358 @@
-const { PrismaClient } = require('@prisma/client');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { generatePayslipPdf } = require('../utils/payslipPdf');
+
+const prisma = require('../lib/prisma');
+const config = require('../config/env');
 const supabase = require('../config/supabase');
+const { generatePayslipPdf } = require('../utils/payslipPdf');
 const { logAudit } = require('../utils/audit');
-
-const prisma = new PrismaClient();
-
-// Helper to get days in month
-function getDaysInMonth(year, month) {
-  return new Date(year, month, 0).getDate();
-}
+const { notifyEmployee } = require('../utils/notify');
+const { monthBounds } = require('../utils/attendanceTime');
+const {
+  matchSlab,
+  calculateSlabCommission,
+  calculateTeamLeadCommission,
+} = require('../utils/commission');
 
 /**
- * Run Payroll: Generate Draft Payslips
+ * Payroll engine.
+ *
+ * Behaviour changes worth calling out:
+ *
+ *  - Re-running a month no longer destroys a finalized run. `runPayroll` used to
+ *    upsert the PayrollRun back to 'draft' and `deleteMany` its payslips with no
+ *    status check, so recomputing an already-finalized month silently deleted
+ *    every issued payslip (and its stored PDF link) with no way back.
+ *
+ *  - The per-employee loop issued six-plus queries each. For 100 staff that was
+ *    600+ round trips to Supabase. Everything is now batch-fetched up front and
+ *    grouped in memory.
+ *
+ *  - Unpaid-leave days spanning a month boundary are counted. The old aggregate
+ *    required startDate >= monthStart AND endDate <= monthEnd, so a leave from
+ *    29 Jan to 2 Feb was ignored by both months entirely.
+ *
+ *  - Money is rounded to whole rupees at the boundary instead of storing values
+ *    like 76666.66666666667 and rendering them raw in the UI.
  */
+
+// Allowances are policy, not code. They were literal 2500s inside the loop.
+const ATTENDANCE_ALLOWANCE = Number(process.env.ATTENDANCE_ALLOWANCE ?? 2500);
+const PUNCTUALITY_ALLOWANCE = Number(process.env.PUNCTUALITY_ALLOWANCE ?? 2500);
+const ATTENDANCE_ALLOWANCE_MAX_LEAVE_DAYS = Number(
+  process.env.ATTENDANCE_ALLOWANCE_MAX_LEAVE_DAYS ?? 1
+);
+const LATES_PER_DAY_DEDUCTION = Number(process.env.LATES_PER_DAY_DEDUCTION ?? 3);
+
+const COMPANY = { name: config.company.name, address: config.company.address };
+
+/** Round to whole currency units; payroll should never carry float dust. */
+const round = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+// ---------------------------------------------------------------------------
+// Run payroll
+// ---------------------------------------------------------------------------
+
 exports.runPayroll = async (req, res, next) => {
   try {
-    const { month, year, performance = [] } = req.body;
+    const { month, year, performance } = req.body;
+    const { start, end, daysInPeriod } = monthBounds(year, month);
 
-    if (!month || !year) {
-      return res.status(400).json({ error: 'Month and year are required' });
+    const existingRun = await prisma.payrollRun.findUnique({
+      where: { periodMonth_periodYear: { periodMonth: month, periodYear: year } },
+    });
+
+    if (existingRun?.status === 'finalized') {
+      return res.status(409).json({
+        error:
+          'This payroll period has already been finalized and cannot be recalculated. ' +
+          'Issued payslips are a financial record.',
+        code: 'PAYROLL_ALREADY_FINALIZED',
+      });
     }
 
-    const startOfMonth = new Date(Date.UTC(year, month - 1, 1));
-    const endOfMonth = new Date(Date.UTC(year, month, 0));
-    const daysInPeriod = getDaysInMonth(year, month);
-
-    // Create or find the PayrollRun
-    const payrollRun = await prisma.payrollRun.upsert({
-      where: {
-        periodMonth_periodYear: {
-          periodMonth: parseInt(month),
-          periodYear: parseInt(year)
-        }
-      },
-      create: {
-        periodMonth: parseInt(month),
-        periodYear: parseInt(year),
-        status: 'draft',
-        createdById: req.user.id
-      },
-      update: {
-        status: 'draft',
-        createdById: req.user.id
-      }
-    });
-
-    // Delete existing payslips under this draft run if any
-    await prisma.payslip.deleteMany({
-      where: { payrollRunId: payrollRun.id }
-    });
-
-    // Fetch all active employees
     const employees = await prisma.employee.findMany({
       where: { status: 'active' },
       include: {
         campaignMembers: {
           where: { status: 'active' },
-          include: { campaign: true }
+          include: { campaign: true },
         },
-        user: true
-      }
+      },
+      orderBy: { employeeCode: 'asc' },
     });
 
-    const payslips = [];
+    if (employees.length === 0) {
+      return res.status(400).json({ error: 'There are no active employees to run payroll for.' });
+    }
 
-    for (const emp of employees) {
-      // 1. Base Salary
-      const baseSalary = emp.baseSalary;
+    const employeeIds = employees.map((e) => e.id);
+    const campaignIds = [
+      ...new Set(employees.flatMap((e) => e.campaignMembers.map((m) => m.campaignId))),
+    ];
 
-      // Find performance record for this employee from database or payload
-      const dbPerf = await prisma.campaignPerformance.findFirst({
-        where: { employeeId: emp.id, month: parseInt(month), year: parseInt(year) }
-      });
-
-      const payloadPerf = performance.find(p => p.employeeId === emp.id);
-
-      const showupsCount = payloadPerf ? (payloadPerf.showups || 0) : (dbPerf ? dbPerf.showups : 0);
-      const meetingsScheduledCount = payloadPerf ? (payloadPerf.meetingsScheduled || 0) : (dbPerf ? dbPerf.meetingsBooked : 0);
-      const noShowsCount = payloadPerf ? (payloadPerf.noShows || 0) : (dbPerf ? dbPerf.noShows : 0);
-      const bonusAmount = payloadPerf ? (payloadPerf.bonus || 0) : 0;
-      const otherDeductionsAmount = payloadPerf ? (payloadPerf.otherDeductions || 0) : 0;
-
-      // 2. Attendance metrics (present, late count)
-      const attendanceRecords = await prisma.attendance.findMany({
+    // ---- Batch-fetch everything the loop needs -----------------------------
+    const [
+      attendanceRows,
+      approvedLeaves,
+      loanRows,
+      spiffRows,
+      dbPerformance,
+      structures,
+      allCampaignMembers,
+      teamPerformance,
+    ] = await Promise.all([
+      prisma.attendance.findMany({
+        where: { employeeId: { in: employeeIds }, date: { gte: start, lte: end } },
+        select: { employeeId: true, status: true, late: true },
+      }),
+      // Overlap, not containment: any leave that touches the month.
+      prisma.leaveRequest.findMany({
         where: {
-          employeeId: emp.id,
-          date: { gte: startOfMonth, lte: endOfMonth }
-        }
-      });
+          employeeId: { in: employeeIds },
+          status: 'approved',
+          startDate: { lte: end },
+          endDate: { gte: start },
+        },
+        select: { employeeId: true, type: true, days: true, startDate: true, endDate: true },
+      }),
+      prisma.loanRequest.findMany({
+        where: {
+          employeeId: { in: employeeIds },
+          status: 'approved',
+          repaymentMonth: month,
+          repaymentYear: year,
+        },
+        select: { employeeId: true, amount: true },
+      }),
+      prisma.spiff.findMany({
+        where: { employeeId: { in: employeeIds }, date: { gte: start, lte: end } },
+        select: { employeeId: true, amount: true },
+      }),
+      prisma.campaignPerformance.findMany({
+        where: { employeeId: { in: employeeIds }, month, year },
+      }),
+      campaignIds.length
+        ? prisma.commissionStructure.findMany({
+            where: { campaignId: { in: campaignIds }, status: 'active' },
+            include: { slabs: { orderBy: { minShowups: 'asc' } } },
+          })
+        : [],
+      campaignIds.length
+        ? prisma.campaignMember.findMany({
+            where: { campaignId: { in: campaignIds }, role: 'sdr', status: 'active' },
+            select: { campaignId: true, employeeId: true },
+          })
+        : [],
+      campaignIds.length
+        ? prisma.campaignPerformance.findMany({
+            where: { campaignId: { in: campaignIds }, month, year },
+            select: { campaignId: true, employeeId: true, showups: true },
+          })
+        : [],
+    ]);
 
+    // ---- Index into lookups ------------------------------------------------
+    const groupBy = (rows, key) => {
+      const map = new Map();
+      for (const row of rows) {
+        const k = row[key];
+        if (!map.has(k)) map.set(k, []);
+        map.get(k).push(row);
+      }
+      return map;
+    };
+
+    const attendanceByEmployee = groupBy(attendanceRows, 'employeeId');
+    const leavesByEmployee = groupBy(approvedLeaves, 'employeeId');
+    const loansByEmployee = groupBy(loanRows, 'employeeId');
+    const spiffsByEmployee = groupBy(spiffRows, 'employeeId');
+    const perfByEmployee = new Map(dbPerformance.map((p) => [p.employeeId, p]));
+    const structureByCampaign = new Map(structures.map((s) => [s.campaignId, s]));
+    const payloadPerf = new Map(performance.map((p) => [p.employeeId, p]));
+
+    const sdrCountByCampaign = new Map();
+    for (const m of allCampaignMembers) {
+      sdrCountByCampaign.set(m.campaignId, (sdrCountByCampaign.get(m.campaignId) || 0) + 1);
+    }
+
+    const teamShowupsByCampaign = new Map();
+    const sdrIdsByCampaign = groupBy(allCampaignMembers, 'campaignId');
+    for (const [cid, members] of sdrIdsByCampaign) {
+      const ids = new Set(members.map((m) => m.employeeId));
+      const total = teamPerformance
+        .filter((p) => p.campaignId === cid && ids.has(p.employeeId))
+        .reduce((sum, p) => sum + p.showups, 0);
+      teamShowupsByCampaign.set(cid, total);
+    }
+
+    /** Approved leave days that actually fall inside this month. */
+    const leaveDaysInMonth = (leave) => {
+      const from = leave.startDate > start ? leave.startDate : start;
+      const to = leave.endDate < end ? leave.endDate : end;
+      const days = Math.floor((to - from) / 86_400_000) + 1;
+      return Math.max(0, Math.min(days, leave.days));
+    };
+
+    // ---- Compute ------------------------------------------------------------
+    const rows = employees.map((emp) => {
+      const baseSalary = emp.baseSalary;
+      const perDay = daysInPeriod > 0 ? baseSalary / daysInPeriod : 0;
+
+      const override = payloadPerf.get(emp.id);
+      const stored = perfByEmployee.get(emp.id);
+
+      const showups = override?.showups ?? stored?.showups ?? 0;
+      const meetingsScheduled = override?.meetingsScheduled ?? stored?.meetingsBooked ?? 0;
+      const noShows = override?.noShows ?? stored?.noShows ?? 0;
+      const bonus = override?.bonus ?? 0;
+      const otherDeductions = override?.otherDeductions ?? 0;
+
+      // Attendance
       let daysPresent = 0;
       let lateCount = 0;
-
-      attendanceRecords.forEach(rec => {
+      for (const rec of attendanceByEmployee.get(emp.id) || []) {
         if (rec.status === 'present' || rec.status === 'wfh' || rec.status === 'leave') {
-          daysPresent += 1.0;
+          daysPresent += 1;
         } else if (rec.status === 'half_day') {
           daysPresent += 0.5;
         }
-        if (rec.late > 0) {
-          lateCount++;
-        }
-      });
+        if (rec.late > 0) lateCount++;
+      }
 
-      // 3. Unpaid leaves deduction
-      const unpaidLeaves = await prisma.leaveRequest.aggregate({
-        _sum: { days: true },
-        where: {
-          employeeId: emp.id,
-          status: 'approved',
-          type: { contains: 'unpaid', mode: 'insensitive' },
-          startDate: { gte: startOfMonth },
-          endDate: { lte: endOfMonth }
-        }
-      });
-      const unpaidDays = unpaidLeaves._sum.days || 0;
-      const unpaidLeaveDeduction = (baseSalary / daysInPeriod) * unpaidDays;
+      // Leave
+      const empLeaves = leavesByEmployee.get(emp.id) || [];
+      let unpaidDays = 0;
+      let totalLeaveDays = 0;
+      for (const leave of empLeaves) {
+        const days = leaveDaysInMonth(leave);
+        totalLeaveDays += days;
+        if (leave.type.toLowerCase().includes('unpaid')) unpaidDays += days;
+      }
 
-      // 4. Late deduction (3 lates = 1 day salary deduction)
-      const lateDeduction = Math.floor(lateCount / 3) * (baseSalary / daysInPeriod);
+      const unpaidLeaveDeduction = perDay * unpaidDays;
+      const lateDeduction =
+        LATES_PER_DAY_DEDUCTION > 0
+          ? Math.floor(lateCount / LATES_PER_DAY_DEDUCTION) * perDay
+          : 0;
 
-      // 5. Loans deduction for this month/year
-      const loans = await prisma.loanRequest.aggregate({
-        _sum: { amount: true },
-        where: {
-          employeeId: emp.id,
-          status: 'approved',
-          repaymentMonth: parseInt(month),
-          repaymentYear: parseInt(year)
-        }
-      });
-      const loansDeduction = loans._sum.amount || 0;
+      const loansDeduction = (loansByEmployee.get(emp.id) || []).reduce((s, l) => s + l.amount, 0);
+      const spiffs = (spiffsByEmployee.get(emp.id) || []).reduce((s, x) => s + x.amount, 0);
 
-      // 6. Spiffs for this month/year
-      const spiffsSum = await prisma.spiff.aggregate({
-        _sum: { amount: true },
-        where: {
-          employeeId: emp.id,
-          date: { gte: startOfMonth, lte: endOfMonth }
-        }
-      });
-      const spiffs = spiffsSum._sum.amount || 0;
-
-      // 7. Campaign Commissions (Dynamic Commission Engine)
+      // Commission
       let commission = 0;
+      const membership = emp.campaignMembers[0];
+      if (membership) {
+        const structure = structureByCampaign.get(membership.campaignId);
+        const slabs = structure?.slabs || [];
 
-      const activeMembership = emp.campaignMembers[0];
-      if (activeMembership) {
-        const campaignId = activeMembership.campaignId;
-        const role = activeMembership.role;
-
-        // Fetch active structure
-        const activeStructure = await prisma.commissionStructure.findFirst({
-          where: { campaignId, status: 'active' },
-          include: { slabs: true }
-        });
-
-        if (activeStructure && activeStructure.slabs.length > 0) {
-          // SDR calculation (Showup Slabs)
-          if (role === 'sdr') {
-            const matchedSlab = activeStructure.slabs.find(slab => 
-              showupsCount >= slab.minShowups && 
-              (slab.maxShowups === null || showupsCount <= slab.maxShowups)
-            );
-            if (matchedSlab) {
-              if (matchedSlab.type === 'per_showup') {
-                commission = showupsCount * matchedSlab.rate;
-              } else if (matchedSlab.type === 'fixed_monthly') {
-                commission = matchedSlab.rate;
-              } else if (matchedSlab.type === 'percentage') {
-                commission = matchedSlab.rate * showupsCount;
-              } else if (matchedSlab.type === 'hybrid') {
-                commission = matchedSlab.rate + (showupsCount * 2000);
-              }
-            }
-          }
-          // Team Lead calculation
-          else if (role === 'team_lead') {
-            // Find all active SDRs in this campaign
-            const teamSdrs = await prisma.campaignMember.findMany({
-              where: { campaignId, role: 'sdr', status: 'active' }
+        if (slabs.length > 0) {
+          if (membership.role === 'sdr') {
+            commission = calculateSlabCommission(matchSlab(slabs, showups), showups);
+          } else if (membership.role === 'team_lead') {
+            commission = calculateTeamLeadCommission({
+              campaignName: membership.campaign.name,
+              teamShowups: teamShowupsByCampaign.get(membership.campaignId) || 0,
+              teamSize: sdrCountByCampaign.get(membership.campaignId) || 0,
+              slabs,
             });
-            const teamSdrIds = teamSdrs.map(s => s.employeeId);
-
-            // Fetch team members' performance
-            const teamPerfs = await prisma.campaignPerformance.findMany({
-              where: {
-                employeeId: { in: teamSdrIds },
-                campaignId,
-                month: parseInt(month),
-                year: parseInt(year)
-              }
-            });
-
-            const teamShowups = teamPerfs.reduce((sum, p) => sum + p.showups, 0);
-            const teamSize = teamSdrs.length;
-
-            if (teamSize > 0) {
-              // Get Campaign Details to check name
-              const campaignObj = await prisma.campaign.findUnique({ where: { id: campaignId } });
-              const campaignName = campaignObj ? campaignObj.name.toUpperCase() : '';
-              
-              // Target campaigns list
-              const targetCampaignNames = ['LVGL', 'CLEO HR', 'PATIENT WING', 'LOGICS', 'BRANDIGADE OUTREACH'];
-              const isTargetCampaign = targetCampaignNames.some(name => campaignName.includes(name));
-
-              if (isTargetCampaign) {
-                // Slab 1: 4 * team_members + 1 -> PKR 10,000
-                // Slab 2: 6 * team_members + 1 -> PKR 14,000
-                // Slab 3: 8 * team_members + 1 -> PKR 18,000
-                // Slab 4: 10 * team_members + 1 -> PKR 22,000
-                if (teamShowups >= (10 * teamSize) + 1) {
-                  commission = 22000;
-                } else if (teamShowups >= (8 * teamSize) + 1) {
-                  commission = 18000;
-                } else if (teamShowups >= (6 * teamSize) + 1) {
-                  commission = 14000;
-                } else if (teamShowups >= (4 * teamSize) + 1) {
-                  commission = 10000;
-                } else {
-                  commission = 0;
-                }
-                console.log(`[Commission TL] Campaign: ${campaignObj.name} | Team Size: ${teamSize} | Total Showups: ${teamShowups} | Commission Paid: PKR ${commission}`);
-              } else {
-                // Fallback to database-driven slab overrides for other campaigns
-                const avgShowups = teamShowups / teamSize;
-                const matchedSlab = activeStructure.slabs.find(slab => 
-                  avgShowups >= slab.minShowups && 
-                  (slab.maxShowups === null || avgShowups <= slab.maxShowups)
-                );
-                if (matchedSlab) {
-                  if (matchedSlab.type === 'per_showup') {
-                    commission = teamShowups * matchedSlab.rate;
-                  } else if (matchedSlab.type === 'fixed_monthly') {
-                    commission = matchedSlab.rate;
-                  } else if (matchedSlab.type === 'percentage') {
-                    commission = matchedSlab.rate * teamShowups;
-                  } else if (matchedSlab.type === 'hybrid') {
-                    commission = matchedSlab.rate + (teamShowups * 2000);
-                  }
-                }
-              }
-            }
           }
         }
       }
 
-      // 8. Final Calculation
-      // Attendance Allowance: 2500, cut after one off (totalLeaveDays > 1)
-      const allLeaves = await prisma.leaveRequest.aggregate({
-        _sum: { days: true },
-        where: {
-          employeeId: emp.id,
-          status: 'approved',
-          startDate: { gte: startOfMonth },
-          endDate: { lte: endOfMonth }
-        }
-      });
-      const totalLeaveDays = allLeaves._sum.days || 0;
-      const attendanceAllowance = totalLeaveDays > 1 ? 0 : 2500;
+      const attendanceAllowance =
+        totalLeaveDays > ATTENDANCE_ALLOWANCE_MAX_LEAVE_DAYS ? 0 : ATTENDANCE_ALLOWANCE;
+      const punctualityAllowance = lateCount >= 1 ? 0 : PUNCTUALITY_ALLOWANCE;
 
-      // Punctuality Allowance: 2500, cut on one late (lateCount >= 1)
-      const punctualityAllowance = lateCount >= 1 ? 0 : 2500;
+      const earnings =
+        baseSalary + attendanceAllowance + punctualityAllowance + bonus + commission + spiffs;
+      const deductions = unpaidLeaveDeduction + lateDeduction + loansDeduction + otherDeductions;
 
-      const earnings = baseSalary + attendanceAllowance + punctualityAllowance + bonusAmount + commission + spiffs;
-      const deductions = unpaidLeaveDeduction + lateDeduction + loansDeduction + otherDeductionsAmount;
-      const netPay = Math.max(0, earnings - deductions);
-
-      // Create Payslip entry in DB
-      const payslip = await prisma.payslip.create({
-        data: {
-          payrollRunId: payrollRun.id,
-          employeeId: emp.id,
-          baseSalary,
-          daysPresent,
-          daysInPeriod,
-          unpaidLeaveDeduction,
-          lateDeduction,
-          loansDeduction,
-          otherDeductions: otherDeductionsAmount,
-          bonus: bonusAmount,
-          commission,
-          spiffs,
-          attendanceAllowance,
-          punctualityAllowance,
-          netPay,
-          showups: showupsCount,
-          meetingsScheduled: meetingsScheduledCount,
-          noShows: noShowsCount
-        },
-        include: {
-          employee: {
-            include: {
-              campaignMembers: {
-                where: { status: 'active' },
-                include: { campaign: true }
-              }
-            }
-          }
-        }
-      });
-
-      payslips.push(payslip);
-    }
-
-    res.json({
-      payrollRun,
-      payslipsCount: payslips.length,
-      payslips
+      return {
+        employeeId: emp.id,
+        baseSalary: round(baseSalary),
+        daysPresent,
+        daysInPeriod,
+        unpaidLeaveDeduction: round(unpaidLeaveDeduction),
+        lateDeduction: round(lateDeduction),
+        loansDeduction: round(loansDeduction),
+        otherDeductions: round(otherDeductions),
+        bonus: round(bonus),
+        commission: round(commission),
+        spiffs: round(spiffs),
+        attendanceAllowance: round(attendanceAllowance),
+        punctualityAllowance: round(punctualityAllowance),
+        netPay: round(Math.max(0, earnings - deductions)),
+        showups,
+        meetingsScheduled,
+        noShows,
+      };
     });
+
+    // ---- Persist as one atomic draft ---------------------------------------
+    const payrollRun = await prisma.$transaction(async (tx) => {
+      const run = await tx.payrollRun.upsert({
+        where: { periodMonth_periodYear: { periodMonth: month, periodYear: year } },
+        create: {
+          periodMonth: month,
+          periodYear: year,
+          status: 'draft',
+          createdById: req.user.id,
+        },
+        update: { status: 'draft', createdById: req.user.id },
+      });
+
+      await tx.payslip.deleteMany({ where: { payrollRunId: run.id } });
+      await tx.payslip.createMany({
+        data: rows.map((row) => ({ ...row, payrollRunId: run.id })),
+      });
+
+      return run;
+    });
+
+    const payslips = await prisma.payslip.findMany({
+      where: { payrollRunId: payrollRun.id },
+      include: {
+        employee: { select: { id: true, fullName: true, employeeCode: true, designation: true } },
+      },
+      orderBy: { employee: { employeeCode: 'asc' } },
+    });
+
+    await logAudit(req.user.id, 'RUN_PAYROLL', 'PayrollRun', payrollRun.id, {
+      month,
+      year,
+      payslipsCount: payslips.length,
+    });
+
+    res.json({ payrollRun, payslipsCount: payslips.length, payslips });
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * Finalize Payroll Run, Generate PDFs, and upload to Supabase Storage
- */
+// ---------------------------------------------------------------------------
+// Finalize
+// ---------------------------------------------------------------------------
+
+/** Render one payslip PDF to a temp file and return its path. */
+function renderPayslipToFile(payslip) {
+  const tempPath = path.join(os.tmpdir(), `payslip-${payslip.id}-${Date.now()}.pdf`);
+
+  return new Promise((resolve, reject) => {
+    const stream = fs.createWriteStream(tempPath);
+    stream.on('finish', () => resolve(tempPath));
+    stream.on('error', reject);
+
+    try {
+      generatePayslipPdf(stream, payslip, COMPANY);
+    } catch (err) {
+      stream.destroy();
+      reject(err);
+    }
+  });
+}
+
 exports.finalizePayroll = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -330,16 +364,14 @@ exports.finalizePayroll = async (req, res, next) => {
           include: {
             employee: {
               include: {
-                user: { select: { role: true } },
-                campaignMembers: {
-                  where: { status: 'active' },
-                  include: { campaign: true }
-                }
-              }
-            }
-          }
-        }
-      }
+                user: { select: { id: true, role: true } },
+                campaignMembers: { where: { status: 'active' }, include: { campaign: true } },
+              },
+            },
+            payrollRun: true,
+          },
+        },
+      },
     });
 
     if (!payrollRun) {
@@ -347,137 +379,141 @@ exports.finalizePayroll = async (req, res, next) => {
     }
 
     if (payrollRun.status === 'finalized') {
-      return res.status(400).json({ error: 'Payroll run is already finalized' });
+      return res.status(409).json({ error: 'Payroll run is already finalized' });
     }
 
-    // Process and generate PDF for each payslip
+    if (payrollRun.payslips.length === 0) {
+      return res.status(400).json({ error: 'This run has no payslips to finalize.' });
+    }
+
+    const failures = [];
+
     for (const payslip of payrollRun.payslips) {
-      // 1. Path to temporary PDF file
-      const tempFileName = `payslip-${payslip.id}-${Date.now()}.pdf`;
-      const tempFilePath = path.join(__dirname, '..', '..', tempFileName);
-      const writeStream = fs.createWriteStream(tempFilePath);
+      let tempPath = null;
+      try {
+        tempPath = await renderPayslipToFile(payslip);
 
-      // 2. Generate PDF into temporary file
-      generatePayslipPdf(writeStream, payslip, { name: 'Brandigade HRIS', address: 'Karachi, Pakistan' });
-
-      // Wait for stream to finish writing
-      await new Promise((resolve, reject) => {
-        writeStream.on('finish', resolve);
-        writeStream.on('error', reject);
-      });
-
-      // 3. Upload to Supabase Storage (if configured)
-      let pdfUrl = null;
-      if (supabase) {
-        const fileBuffer = fs.readFileSync(tempFilePath);
-        const storagePath = `${payrollRun.periodYear}/${payrollRun.periodMonth}/${payslip.id}.pdf`;
-
-        const { data, error } = await supabase.storage
-          .from('payslips')
-          .upload(storagePath, fileBuffer, {
-            contentType: 'application/pdf',
-            upsert: true
-          });
-
-        if (error) {
-          console.error(`[Supabase Upload Error] employee ${payslip.employeeId}:`, error.message);
-        } else {
-          // Get public URL
-          const { data: publicData } = supabase.storage
+        if (supabase) {
+          const storagePath = `${payrollRun.periodYear}/${payrollRun.periodMonth}/${payslip.id}.pdf`;
+          const { error } = await supabase.storage
             .from('payslips')
-            .getPublicUrl(storagePath);
-          pdfUrl = publicData.publicUrl;
+            .upload(storagePath, fs.readFileSync(tempPath), {
+              contentType: 'application/pdf',
+              upsert: true,
+            });
+
+          if (error) {
+            failures.push(`${payslip.employee.fullName}: ${error.message}`);
+          } else {
+            // The bucket is private, so we store the object path rather than a
+            // public URL. Downloads go through the authenticated endpoint below.
+            await prisma.payslip.update({
+              where: { id: payslip.id },
+              data: { pdfUrl: storagePath },
+            });
+          }
+        }
+      } catch (err) {
+        failures.push(`${payslip.employee.fullName}: ${err.message}`);
+      } finally {
+        if (tempPath) {
+          fs.promises.unlink(tempPath).catch(() => {});
         }
       }
-
-      // 4. Update payslip with pdfUrl
-      await prisma.payslip.update({
-        where: { id: payslip.id },
-        data: { pdfUrl }
-      });
-
-      // 5. Delete temporary file
-      try {
-        fs.unlinkSync(tempFilePath);
-      } catch (err) {
-        console.error('Failed to clean up temp file:', err.message);
-      }
     }
 
-    // Mark payroll run as finalized
     const updatedRun = await prisma.payrollRun.update({
       where: { id },
-      data: {
-        status: 'finalized',
-        finalizedAt: new Date()
-      }
+      data: { status: 'finalized', finalizedAt: new Date() },
     });
 
-    await logAudit(req.user.id, 'FINALIZE_PAYROLL_RUN', 'PayrollRun', id);
-    res.json({ message: 'Payroll run finalized and payslip PDFs generated successfully', payrollRun: updatedRun });
+    // Tell each employee their payslip is available.
+    await Promise.all(
+      payrollRun.payslips.map((payslip) =>
+        notifyEmployee(payslip.employeeId, {
+          title: 'Payslip available',
+          message: `Your payslip for ${payrollRun.periodMonth}/${payrollRun.periodYear} is ready to download.`,
+          type: 'payroll',
+          link: '/dashboard/payroll',
+        })
+      )
+    );
+
+    await logAudit(req.user.id, 'FINALIZE_PAYROLL_RUN', 'PayrollRun', id, {
+      payslips: payrollRun.payslips.length,
+      failures: failures.length,
+    });
+
+    res.json({
+      message: 'Payroll run finalized.',
+      payrollRun: updatedRun,
+      payslipsProcessed: payrollRun.payslips.length,
+      // Surface archival failures instead of only console.error-ing them.
+      storageFailures: failures,
+    });
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * Get Payroll History / Draft Runs
- */
+// ---------------------------------------------------------------------------
+// Reads
+// ---------------------------------------------------------------------------
+
 exports.getPayrollRuns = async (req, res, next) => {
   try {
     const runs = await prisma.payrollRun.findMany({
-      orderBy: [{ periodYear: 'desc' }, { periodMonth: 'desc' }]
+      include: { _count: { select: { payslips: true } } },
+      orderBy: [{ periodYear: 'desc' }, { periodMonth: 'desc' }],
     });
-    res.json(runs);
+
+    // Total cost per run, so the dashboard can show real payroll expense rather
+    // than the hard-coded 450000 placeholder it used to display.
+    const totals = await prisma.payslip.groupBy({
+      by: ['payrollRunId'],
+      _sum: { netPay: true },
+    });
+    const totalByRun = new Map(totals.map((t) => [t.payrollRunId, t._sum.netPay || 0]));
+
+    res.json(
+      runs.map((run) => ({
+        ...run,
+        payslipCount: run._count.payslips,
+        totalNetPay: round(totalByRun.get(run.id) || 0),
+      }))
+    );
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * Get Payslips of a Run
- */
 exports.getPayslipsByRun = async (req, res, next) => {
   try {
     const { runId } = req.params;
-    
-    // RBAC: Standard Employee/SDR should use /my-payslips instead
-    if (['Employee', 'SDR'].includes(req.user.role)) {
-      return res.status(403).json({ error: 'Access denied.' });
-    }
 
     const payslips = await prisma.payslip.findMany({
       where: { payrollRunId: runId },
       include: {
-        employee: {
-          select: { id: true, fullName: true, employeeCode: true, designation: true }
-        }
-      }
+        employee: { select: { id: true, fullName: true, employeeCode: true, designation: true } },
+      },
+      orderBy: { employee: { employeeCode: 'asc' } },
     });
+
     res.json(payslips);
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * Standard employee fetch their own payslips
- */
 exports.getMyPayslips = async (req, res, next) => {
   try {
-    if (!req.user.employee) {
-      return res.status(400).json({ error: 'No employee profile linked to user.' });
-    }
-
     const payslips = await prisma.payslip.findMany({
       where: {
         employeeId: req.user.employee.id,
-        payrollRun: { status: 'finalized' } // Only finalized payslips
+        payrollRun: { status: 'finalized' },
       },
-      include: {
-        payrollRun: true
-      },
-      orderBy: { generatedAt: 'desc' }
+      include: { payrollRun: true },
+      orderBy: [{ payrollRun: { periodYear: 'desc' } }, { payrollRun: { periodMonth: 'desc' } }],
     });
 
     res.json(payslips);
@@ -487,91 +523,123 @@ exports.getMyPayslips = async (req, res, next) => {
 };
 
 /**
- * Stream/Download PDF payslip directly from server on-the-fly
+ * Stream a payslip PDF.
+ *
+ * Rendered on demand rather than served from a public storage URL, so the RBAC
+ * check below is the only way to reach it.
  */
 exports.getPayslipPdfFile = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    // Fetch the payslip
     const payslip = await prisma.payslip.findUnique({
       where: { id },
       include: {
-          employee: {
-            include: {
-              user: { select: { role: true } },
-              campaignMembers: {
-                where: { status: 'active' },
-                include: { campaign: true }
-              }
-            }
+        employee: {
+          include: {
+            user: { select: { role: true } },
+            campaignMembers: { where: { status: 'active' }, include: { campaign: true } },
           },
-        payrollRun: true
-      }
+        },
+        payrollRun: true,
+      },
     });
 
     if (!payslip) {
       return res.status(404).json({ error: 'Payslip not found' });
     }
 
-    // Role check: Normal Employee/SDR can only download their own payslip
-    if (['Employee', 'SDR'].includes(req.user.role) && (!req.user.employee || req.user.employee.id !== payslip.employeeId)) {
+    const isAdminRole = ['Admin', 'CEO', 'COO'].includes(req.user.role);
+    const isOwn = req.user.employee?.id === payslip.employeeId;
+
+    if (!isAdminRole && !isOwn) {
       return res.status(403).json({ error: 'Forbidden: Access denied' });
     }
 
-    // Stream PDF directly to client response
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="payslip-${payslip.id}.pdf"`);
+    // Staff only see a payslip once the run is finalized; a draft can still change.
+    if (!isAdminRole && payslip.payrollRun.status !== 'finalized') {
+      return res.status(403).json({ error: 'This payslip has not been issued yet.' });
+    }
 
-    generatePayslipPdf(res, payslip, { name: 'Brandigade', address: 'Karachi, Pakistan' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="payslip-${payslip.employee.employeeCode}-${payslip.payrollRun.periodMonth}-${payslip.payrollRun.periodYear}.pdf"`
+    );
+
+    generatePayslipPdf(res, payslip, COMPANY);
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * Generate Manual PDF on the fly
- */
+/** Ad-hoc payslip for someone not in the system (contractor, correction, etc.). */
 exports.generateManualPdf = async (req, res, next) => {
   try {
     const body = req.body;
 
     const payslip = {
-      periodMonth: parseInt(body.periodMonth) || new Date().getMonth() + 1,
-      periodYear: parseInt(body.periodYear) || new Date().getFullYear(),
+      id: 'manual',
       generatedAt: new Date(),
-      baseSalary: parseFloat(body.baseSalary) || 0,
-      spiffs: parseFloat(body.spiff) || 0,
-      commission: parseFloat(body.commission) || 0,
-      bonus: parseFloat(body.bonus) || 0,
-      bonusNotes: body.bonusNotes || '',
-      unpaidLeaveDeduction: parseFloat(body.absentsLatesDeduction) || 0,
+      payrollRun: { periodMonth: body.periodMonth, periodYear: body.periodYear },
+      periodMonth: body.periodMonth,
+      periodYear: body.periodYear,
+      baseSalary: body.baseSalary,
+      spiffs: body.spiff,
+      commission: body.commission,
+      bonus: body.bonus,
+      bonusNotes: body.bonusNotes,
+      unpaidLeaveDeduction: body.absentsLatesDeduction,
       lateDeduction: 0,
-      loansDeduction: parseFloat(body.loansDeduction) || 0,
-      otherDeductions: parseFloat(body.otherDeductions) || 0,
-      deductionNotes: body.deductionNotes || '',
-      attendanceAllowance: parseFloat(body.attendanceAllowance) || 0,
-      punctualityAllowance: parseFloat(body.punctualityAllowance) || 0,
+      loansDeduction: body.loansDeduction,
+      otherDeductions: body.otherDeductions,
+      deductionNotes: body.deductionNotes,
+      attendanceAllowance: body.attendanceAllowance,
+      punctualityAllowance: body.punctualityAllowance,
+      daysPresent: 0,
+      daysInPeriod: 0,
+      showups: 0,
+      meetingsScheduled: 0,
+      noShows: 0,
+      netPay: round(
+        body.baseSalary +
+          body.attendanceAllowance +
+          body.punctualityAllowance +
+          body.spiff +
+          body.commission +
+          body.bonus -
+          body.absentsLatesDeduction -
+          body.loansDeduction -
+          body.otherDeductions
+      ),
       employee: {
-        fullName: body.fullName || 'Anonymous Employee',
-        employeeCode: body.employeeCode || 'BG-0000',
+        fullName: body.fullName,
+        employeeCode: body.employeeCode,
         designation: body.designation || 'Staff',
         bankAccount: body.bankAccount || '',
         campaignMembers: [
           {
             role: body.isTeamLead ? 'team_lead' : 'sdr',
-            campaign: {
-              name: body.campaignName || 'Operations'
-            }
-          }
-        ]
-      }
+            campaign: { name: body.campaignName || 'Operations' },
+          },
+        ],
+      },
     };
 
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="payslip-${body.fullName || 'manual'}.pdf"`);
+    await logAudit(req.user.id, 'GENERATE_MANUAL_PAYSLIP', 'Payslip', null, {
+      fullName: body.fullName,
+      employeeCode: body.employeeCode,
+      periodMonth: body.periodMonth,
+      periodYear: body.periodYear,
+    });
 
-    generatePayslipPdf(res, payslip, { name: 'Brandigade', address: 'Karachi, Pakistan' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="payslip-${body.employeeCode}-manual.pdf"`
+    );
+
+    generatePayslipPdf(res, payslip, COMPANY);
   } catch (err) {
     next(err);
   }
