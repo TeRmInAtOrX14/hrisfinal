@@ -1,27 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { motion } from 'framer-motion';
 import { Users, Briefcase, CalendarCheck, TrendingUp, CheckCircle, HelpCircle, UserCheck } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import api from '../utils/api';
 
-export default function AdminDashboard({ stats }) {
-  const [campaigns, setCampaigns] = useState([]);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    const fetchCampaignsSummary = async () => {
-      try {
-        setLoading(true);
-        const res = await api.get('/campaigns');
-        setCampaigns(res.data.filter(c => c.status === 'active'));
-      } catch (err) {
-        console.error('Failed to load campaigns summary');
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchCampaignsSummary();
-  }, []);
+export default function AdminDashboard({ stats, campaigns = [] }) {
 
   return (
     <motion.div

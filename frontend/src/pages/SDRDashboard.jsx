@@ -15,8 +15,10 @@ import {
   Loader2,
   ListCollapse,
   ChevronRight,
-  TrendingDown
+  TrendingDown,
+  PhoneCall
 } from 'lucide-react';
+import { openBrandigadeDialer } from '../utils/openDialer';
 import {
   AreaChart,
   Area,
@@ -62,39 +64,35 @@ export default function SDRDashboard() {
   const fetchData = async () => {
     try {
       setLoading(true);
-      
-      // Fetch SDR's own profile
-      const empRes = await api.get('/employees');
-      const empData = empRes.data[0]; // Backend restricts SDR to only see themselves
-      if (!empData) throw new Error('Employee profile not found');
-      setEmployee(empData);
 
-      // Find active campaign assigned to this SDR
-      const activeMember = empData.campaignMembers?.find(m => m.status === 'active');
-      let campaignId = activeMember?.campaignId;
-
-      // Fetch today and historical attendance
       const today = new Date();
       const currentMonth = today.getMonth() + 1;
       const currentYear = today.getFullYear();
-      
-      // Fetch last 30 days of attendance
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(today.getDate() - 30);
-      const attRes = await api.get(`/attendance?startDate=${thirtyDaysAgo.toISOString().split('T')[0]}&endDate=${today.toISOString().split('T')[0]}`);
-      setAttendance(attRes.data);
+      const thirtyDaysAgoStr = thirtyDaysAgo.toISOString().split('T')[0];
+      const todayStr = today.toISOString().split('T')[0];
 
-      // Fetch requests
-      const [leaveRes, halfdayRes, wfhRes] = await Promise.all([
+      // Fetch employee, attendance, and requests all in parallel
+      const [empRes, attRes, leaveRes, halfdayRes, wfhRes] = await Promise.all([
+        api.get('/employees'),
+        api.get(`/attendance?startDate=${thirtyDaysAgoStr}&endDate=${todayStr}`),
         api.get('/requests/leave'),
         api.get('/requests/halfday'),
         api.get('/requests/wfh')
       ]);
+
+      const empData = empRes.data[0];
+      if (!empData) throw new Error('Employee profile not found');
+      setEmployee(empData);
+      setAttendance(attRes.data);
       setLeaves(leaveRes.data);
       setHalfdays(halfdayRes.data);
       setWfh(wfhRes.data);
 
-      // If assigned to a campaign, fetch the campaign dashboard to get performance show-ups
+      // Campaign dashboard depends on campaignId from employee data
+      const activeMember = empData.campaignMembers?.find(m => m.status === 'active');
+      const campaignId = activeMember?.campaignId;
       if (campaignId) {
         const campDashRes = await api.get(`/campaigns/${campaignId}/dashboard?month=${currentMonth}&year=${currentYear}`);
         setCampaignDashboard(campDashRes.data);
@@ -191,6 +189,13 @@ export default function SDRDashboard() {
           <p className="text-xs text-brand-text-soft mt-1">Personal intelligence portal for {employee?.fullName}.</p>
         </div>
         <div className="flex items-center gap-4 z-10">
+          <button
+            onClick={openBrandigadeDialer}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-brand-blue via-brand-violet to-brand-cyan text-brand-bg font-extrabold text-xs uppercase tracking-wider font-display shadow-lg hover:shadow-cyan-500/25 hover:scale-105 active:scale-95 transition-all duration-300 cursor-pointer border border-brand-cyan/30"
+          >
+            <PhoneCall className="w-4 h-4 animate-pulse" />
+            <span>Launch Brandigade Dialer</span>
+          </button>
           <div className="text-right">
             <span className="text-[9px] font-bold text-brand-text-mute uppercase tracking-widest block">Active Assignment</span>
             <span className="text-xs font-bold text-white uppercase font-display bg-brand-blue/10 border border-brand-blue/20 px-3 py-1 rounded-full mt-1 inline-block">

@@ -1,5 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const { syncZKTeco } = require('../utils/zkteco');
+const { processBatchPunches } = require('../utils/punchIngest');
 const { logAudit } = require('../utils/audit');
 
 const prisma = new PrismaClient();
@@ -237,3 +238,18 @@ exports.manualPunch = async (req, res, next) => {
     next(err);
   }
 };
+
+exports.receivePunches = async (req, res, next) => {
+  try {
+    const { punches } = req.body;
+    if (!Array.isArray(punches)) {
+      return res.status(400).json({ error: 'Payload must contain a "punches" array.' });
+    }
+
+    const result = await processBatchPunches(punches);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+};
+

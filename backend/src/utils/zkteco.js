@@ -11,9 +11,6 @@ const DEVICE_IP = process.env.ZKTECO_IP || null;
 const DEVICE_PORT = Number(process.env.ZKTECO_PORT) || 4370;
 const TIMEOUT = 5000;
 
-// Persists the last sync timestamp so we don't re-process old records on restart
-const STATE_FILE = path.join(__dirname, '../../data/sync-state.json');
-
 // Office hours defaults (overridable via .env)
 const OFFICE_START = process.env.OFFICE_START_TIME || '09:30';
 const OFFICE_END   = process.env.OFFICE_END_TIME   || '18:30';
@@ -227,7 +224,6 @@ async function syncZKTeco() {
       punches.sort((a, b) => a - b);
 
       const deviceCheckIn  = punches[0];
-      const deviceCheckOut = punches.length > 1 ? punches[punches.length - 1] : null;
 
       const dateKey    = dateMidnight.toISOString().split('T')[0];
       const mapKey     = `${emp.id}_${dateKey}`;

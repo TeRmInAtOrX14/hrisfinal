@@ -31,7 +31,7 @@ function generatePayslipPdf(stream, payslip, company = { name: 'Brandigade', add
   // ---------------- HEADER SECTION ----------------
   const logoPath = path.join(__dirname, '..', 'public', 'logo.png');
   if (fs.existsSync(logoPath)) {
-    doc.image(logoPath, 50, 45, { width: 50 });
+    doc.image(logoPath, 50, 48, { width: 175 });
   } else {
     // High-quality modern geometric fallback logo
     doc.save();
@@ -39,11 +39,8 @@ function generatePayslipPdf(stream, payslip, company = { name: 'Brandigade', add
     doc.circle(75, 70, 16).fill('#2563EB');
     doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(18).text('B', 69, 63);
     doc.restore();
+    doc.fontSize(22).fillColor('#1E3A8A').font('Helvetica-Bold').text('Brandigade', 105, 53);
   }
-
-  // Company details on the left
-  doc.fontSize(22).fillColor('#1E3A8A').font('Helvetica-Bold').text('Brandigade', 105, 53);
-  doc.fontSize(8).fillColor('#6B7280').font('Helvetica').text('Corporate Outreach & Sales Operations', 105, 76);
 
   // Payslip title & metadata on the right
   doc.fontSize(16).fillColor('#1F2937').font('Helvetica-Bold').text('EMPLOYEE PAYSLIP', 300, 50, { align: 'right', width: 245 });

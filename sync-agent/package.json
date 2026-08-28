@@ -1,0 +1,19 @@
+{
+  "name": "brandigade-hris-sync-agent",
+  "version": "1.0.0",
+  "description": "Reads the office ZKTeco biometric device and forwards punches to the Brandigade HRIS server",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "full-sync": "node index.js --full"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "node-zklib": "^1.3.0"
+  },
+  "license": "ISC"
+}

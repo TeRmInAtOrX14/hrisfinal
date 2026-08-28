@@ -43,21 +43,26 @@ export default function Dashboard() {
     const fetchDashboardStats = async () => {
       try {
         setLoading(true);
-        const empRes = await api.get('/employees');
-        let totalEmployees = empRes.data.length;
+        const todayStr = new Date().toISOString().split('T')[0];
+
+        // Fetch all required data in parallel
+        const [empRes, attRes, projRes, runRes] = await Promise.all([
+          api.get('/employees'),
+          api.get(`/attendance?startDate=${todayStr}&endDate=${todayStr}`),
+          (isAdmin || isTeamLead) ? api.get('/campaigns') : Promise.resolve({ data: [] }),
+          isAdmin ? api.get('/payroll/runs') : Promise.resolve({ data: [] })
+        ]);
+
+        const totalEmployees = empRes.data.length;
         
         let presentToday = 0;
         let lateToday = 0;
-        const todayStr = new Date().toISOString().split('T')[0];
-        const attRes = await api.get(`/attendance?startDate=${todayStr}&endDate=${todayStr}`);
         attRes.data.forEach(r => {
           if (r.status === 'present' || r.status === 'half_day') presentToday++;
           if (r.late > 0) lateToday++;
         });
 
         if (isAdmin) {
-          const projRes = await api.get('/campaigns');
-          const runRes = await api.get('/payroll/runs');
           const activeProjects = projRes.data.filter(p => p.status === 'active').length;
           
           const payrollHistoryData = runRes.data.map(run => ({
@@ -79,6 +84,7 @@ export default function Dashboard() {
             presentToday,
             lateToday,
             payrollHistoryData,
+            campaigns: projRes.data.filter(p => p.status === 'active'),
             attendanceChartData: [
               { name: 'Mon', Present: 8, Late: 1, WFH: 1 },
               { name: 'Tue', Present: 9, Late: 0, WFH: 1 },
@@ -88,14 +94,8 @@ export default function Dashboard() {
             ]
           });
         } else if (isTeamLead) {
-          const projRes = await api.get('/campaigns');
-          const activeProjects = projRes.data.filter(p => p.status === 'active').length;
-          setStats({
-            totalEmployees,
-            activeProjects,
-            presentToday,
-            lateToday
-          });
+          // TeamLead dashboard manages its own data — no stats needed from parent
+          setStats({ ready: true });
         } else {
           setStats({
             totalEmployees: 1,
@@ -114,7 +114,8 @@ export default function Dashboard() {
     fetchDashboardStats();
   }, [isAdmin, isTeamLead]);
 
-  if (loading) {
+  // For TeamLead and SDR, skip parent-level loading — they manage their own fetching
+  if (loading && isAdmin) {
     return (
       <div className="flex-1 flex items-center justify-center min-h-[60vh]">
         <div className="flex flex-col items-center gap-3">
@@ -140,7 +141,7 @@ export default function Dashboard() {
 
   return (
     <motion.div variants={container} initial="hidden" animate="show" className="space-y-6">
-      { isAdmin ? (<AdminDashboard stats={stats} />) : isTeamLead ? (<TeamLeadDashboard />) : (<SDRDashboard stats={stats} />) }
+      { isAdmin ? (<AdminDashboard stats={stats} campaigns={stats?.campaigns || []} />) : isTeamLead ? (<TeamLeadDashboard />) : (<SDRDashboard stats={stats} />) }
     </motion.div>
   );
 }

@@ -18,8 +18,9 @@ exports.login = async (req, res, next) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { email },
+    // Case-insensitive email lookup (emails stored with mixed case)
+    const user = await prisma.user.findFirst({
+      where: { email: { equals: email, mode: 'insensitive' } },
       include: { employee: true }
     });
 
@@ -113,9 +114,9 @@ exports.googleLogin = async (req, res, next) => {
       return res.status(400).json({ error: 'Google account email is required' });
     }
 
-    // Only allow pre-registered users — no auto-creation
-    let user = await prisma.user.findUnique({
-      where: { email },
+    // Only allow pre-registered users — no auto-creation (case-insensitive match)
+    let user = await prisma.user.findFirst({
+      where: { email: { equals: email, mode: 'insensitive' } },
       include: { employee: true }
     });
 

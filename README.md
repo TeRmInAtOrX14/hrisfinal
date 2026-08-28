@@ -1,236 +1,178 @@
-# Brandigade HRIS
+# Brandigade HRIS & Biometric Attendance System
 
-A self-hosted HR system built for Brandigade's internal use: employee records, org chart,
-leave management, attendance tracking, and payroll with auto-generated PDF payslips.
-
-This is real, working software — not a demo. It has a proper backend, a database, password
-hashing, and role-based access control (Admin vs Employee). You are responsible for deploying
-and securing it, so please read the **Security checklist** before putting real employee data
-into it.
+**Brandigade HRIS** is an enterprise-grade, full-stack Human Resource Information System and Biometric Sync suite built for Brandigade. It manages employee lifecycles, org charts, request workflows, campaign & SDR performance tracking, dynamic commission slabs, spiffs, loans, biometric attendance, and automated payroll with PDF payslips.
 
 ---
 
-## What's included
+## Architecture Overview
 
-- **Authentication** — admin and employee logins. Admin creates each employee's account
-  (this is your "license"/seat creation) and gets a temporary password to share with them.
-  Employees are forced to set their own password on first login.
-- **Employee records** — name, designation, department, manager, salary, contact info,
-  employment status.
-- **Org chart** — built automatically from each employee's assigned manager.
-- **Leave management** — configurable leave types (Annual, Sick, Casual, Unpaid by default),
-  employee self-service leave requests, admin approve/reject, automatic balance tracking.
-- **Attendance** — admin marks attendance per day (bulk "mark everyone present" with
-  per-person overrides for absences/half-days).
-- **Payroll** — monthly payroll runs. Pay is automatically pro-rated against attendance
-  (unpaid absences reduce pay; approved leave does not). Admin can add a bonus or extra
-  deduction per employee before finalizing. Finalizing locks the run and generates a
-  PDF payslip for every employee, downloadable by the employee or the admin.
-- **Salary increments** — logged with a date and reason, so there's a full history per
-  employee, not just the current number.
+```mermaid
+flowchart TD
+    subgraph Office_LAN["Office Local Network (LAN)"]
+        ZK["ZKTeco Biometric Device\n(UFace 800 / Face & Fingerprint)"]
+        Agent["Biometric Sync Agent\n(sync-agent Node.js CLI)"]
+        TaskSch["Windows Task Scheduler / Cron\n(Runs every 5-15 mins)"]
+        
+        TaskSch --> Agent
+        Agent -- "Reads punches via TCP 4370 (node-zklib)" --> ZK
+    end
 
-## What's *not* included (be aware of this)
+    subgraph Hosting_Cloud["Cloud Hosting (Namecheap / Vercel / VPS)"]
+        API["Brandigade HRIS Backend API\n(Express.js Node 22+)"]
+        AuthMiddleware["Sync Agent Auth\n(x-sync-token validation)"]
+        DB[(Database\nPostgreSQL / Supabase / Namecheap MySQL)]
+        Frontend["Brandigade HRIS Frontend\n(React / Modern Web Interface)"]
+        
+        API <--> DB
+        Frontend <--> API
+    end
 
-This covers the core of an HRIS but is intentionally scoped down from a commercial product:
-
-- No tax withholding / statutory deduction calculations (Pakistan income tax, EOBI, etc.) —
-  the "Other Deductions" field on a payroll run is a manual override for now. If you need
-  real tax compliance, this needs further work before you rely on it for that.
-- No email notifications (e.g. "your leave was approved") — everything is visible in-app only.
-- No file attachments (e.g. uploading ID documents).
-- No multi-company / multi-currency support beyond the `currency` field per employee.
-- Single admin role — there's no "HR manager who isn't a full admin" tier yet.
-
----
-
-## Requirements
-
-- **Node.js 22.5 or newer** (this project uses Node's built-in SQLite support, so there is
-  no native module to compile — it should "just work" on any server with a recent Node).
-- A server or VPS you control (this is *not* meant to run on Claude's infrastructure —
-  you need to host it yourself, e.g. a small DigitalOcean/Linode/Railway/Render instance,
-  or even a spare office machine that stays on).
-
-Check your Node version:
-```bash
-node -v
+    Agent -- "HTTP POST /api/attendance/punches (HTTPS)" --> AuthMiddleware --> API
 ```
-If it's older than v22.5, install a newer Node first (e.g. via [nvm](https://github.com/nvm-sh/nvm)).
 
 ---
 
-## Setup (first time)
+## Key Modules & Features
 
-1. **Copy this whole `hris` folder** to your server.
+### 1. Authentication & Security
+- **Multi-Tenant Auth**: JWT Bearer authentication with short-lived access tokens and refresh tokens.
+- **Google SSO**: One-click Google Sign-In (`Sign in with Google`).
+- **First-Time Login Security**: Enforced password change upon initial account creation.
+- **Sync Agent Auth**: Dedicated `x-sync-token` security layer for off-site biometric log ingestion.
 
-2. **Install backend dependencies:**
+### 2. Employee Records & Org Chart
+- **360° Employee Profiles**: Full name, employee code (`EMP-001`), designation, phone, bank details, emergency contacts, photo, and shift parameters.
+- **Biometric Linking**: `zkUserId` / `employeeCode` automatic mapping to biometric hardware IDs.
+- **Hierarchical Org Chart**: Built automatically from manager-subordinate relations.
+- **Compensation History**: Full audit trail of salary increments with effective dates and reasons.
+
+### 3. Biometric Attendance & Shift Management
+- **Remote Biometric Ingestion**: Office-side `sync-agent` reads hardware attendance logs and pushes them to cloud/Namecheap API over HTTPS.
+- **Smart Punch Deduplication & Merging**: Earliest punch recorded as `checkIn`.
+- **Late Minutes & Grace Period**: Automatic late minute calculation against employee shift start (`09:30`) and custom grace periods (`15 mins`).
+- **Summary Metrics**: Monthly present days, late count, total late minutes, half-days, and leave totals.
+
+### 4. Employee Self-Service & Request Workflows
+- **Leave Requests**: Annual, Sick, Casual, Unpaid leave applications with manager approval/rejection workflow.
+- **Half-Day Requests**: Single-click half-day applications.
+- **Work From Home (WFH) Requests**: Date range WFH requests with approval status tracking.
+
+### 5. SDR & Campaign Performance Tracking
+- **Campaign Management**: Active/inactive campaigns with monthly show-up targets.
+- **Team Allocation**: Assign Team Leads and SDRs to campaigns (`CampaignMember`).
+- **Performance Logging**: Monthly performance metrics per SDR (Meetings Booked, Show-ups, No-shows, Cancelled Meetings).
+
+### 6. Dynamic Commission Slabs & Spiffs
+- **Slab-Based Commissions**: Tiered show-up commission rates (e.g., 1–10 showups @ $10/ea, 11–20 @ $15/ea, 21+ @ $20/ea).
+- **Spiff Incentives**: Manager/Admin awarded one-off cash spiffs with audit reasons.
+
+### 7. Loans & Salary Advances
+- **Employee Loan Requests**: Request salary advances or loans with specified repayment target month/year.
+- **Automated Deduction Engine**: Automatically deducts approved loan repayments during monthly payroll processing.
+
+### 8. Payroll Engine & PDF Payslips
+- **Automated Monthly Payroll**: Computes base salary, pro-rated attendance deductions, late penalties, loan repayments, spiffs, and commissions.
+- **Automated PDF Payslips**: Generates downloadable PDF payslips using `PDFKit`.
+
+### 9. Integrated Brandigade Dialer Launcher
+- **Desktop & Web Integration**: One-click **"Brandigade Dialer"** button embedded in the main navigation header and SDR dashboard.
+- **Smart Protocol Fallback**: Attempts to launch the native desktop application (`brandigadedialer://`). If the desktop app is not installed, it automatically opens `https://dialer.brandigade.com` in Google Chrome / browser tab.
+
+---
+
+## Role-Based Access Control (RBAC) Matrix
+
+| Feature / Module | Admin / CEO / COO | Team Lead | SDR / Regular Employee |
+| :--- | :---: | :---: | :---: |
+| **Manage Employees & Salaries** | Full Access | Read-Only | Read Self Only |
+| **View Org Chart** | Full Access | Full Access | Full Access |
+| **Approve / Reject Requests** | Full Access | Team Members Only | Self Only (Submit) |
+| **Biometric Attendance** | View All / Manual Override | Team Members Only | Self Only |
+| **Campaign & Performance Management** | Full Access | Assigned Campaigns | Self Performance |
+| **Manage Commission Slabs** | Full Access | Read-Only | No Access |
+| **Award Spiffs** | Full Access | Team Members | No Access |
+| **Payroll & Payslip Generation** | Full Access | No Access | View Own Payslip |
+| **Audit Logs & System Settings** | Full Access | No Access | No Access |
+
+---
+
+## Database Architecture
+
+The system uses **Prisma ORM** for type-safe database access.
+
+### Supported Databases
+1. **PostgreSQL / Supabase** (Default): Configured in `prisma/schema.prisma` with connection pooling (`DATABASE_URL` & `DIRECT_URL`).
+2. **Namecheap MySQL / MariaDB**: If deploying to standard cPanel hosting with MySQL, change the provider in `prisma/schema.prisma` to `"mysql"`.
+
+```prisma
+datasource db {
+  provider  = "postgresql" // or "mysql" for Namecheap cPanel MySQL
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+```
+
+---
+
+## Deploying to Namecheap & Setup Guide
+
+### Step 1: Upload & Install HRIS Backend on Namecheap
+1. Log into **cPanel** on Namecheap.
+2. Open **Setup Node.js App** and create a new Node application:
+   - **Node.js Version**: 20.x or 22.x
+   - **Application Root**: `backend`
+   - **Application Startup File**: `src/server.js`
+3. Upload the `backend` code directory to your Namecheap server.
+4. Create a database in Namecheap cPanel (**MySQL Databases** or **PostgreSQL Databases**).
+5. In your Node App dashboard on cPanel, add Environment Variables:
+   ```env
+   PORT=4000
+   DATABASE_URL="postgresql://user:pass@localhost:5432/brandigade_hris"
+   JWT_SECRET="your_generated_jwt_secret"
+   SYNC_AGENT_TOKEN="your_strong_sync_secret_token"
+   OFFICE_START_TIME="09:30"
+   COMPANY_NAME="Brandigade"
+   ```
+6. Run `npm install` and `npx prisma db push` via cPanel terminal.
+
+---
+
+### Step 2: Setting Up the Office `sync-agent`
+The `sync-agent` runs on a machine located in your office network that can reach the ZKTeco device IP.
+
+1. Open `sync-agent/.env` on the office machine:
+   ```env
+   HRIS_API_URL=https://hris.brandigade.com/api
+   SYNC_AGENT_TOKEN=your_strong_sync_secret_token
+   ZKTECO_IP=192.168.1.100
+   ZKTECO_PORT=4370
+   LOOKBACK_DAYS=3
+   ```
+2. Install dependencies:
    ```bash
-   cd hris/backend
+   cd sync-agent
    npm install
    ```
-
-3. **Create your environment file:**
-   ```bash
-   cp .env.example .env
-   ```
-   Then edit `.env` and set real values:
-   - `JWT_SECRET` — generate one with:
-     ```bash
-     node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
-     ```
-     Paste the output in as `JWT_SECRET`. Never reuse the example value.
-   - `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` — this becomes the first admin
-     account (yours). **Use a strong password.** You'll be prompted to change it on
-     first login anyway, but don't leave the placeholder in even temporarily on a
-     real server.
-   - `COMPANY_NAME` / `COMPANY_ADDRESS` — shown on payslips.
-
-4. **Create the database and the admin account:**
-   ```bash
-   npm run seed
-   ```
-   This only creates the admin account if one doesn't already exist, so it's safe to
-   re-run later (e.g. after pulling an update) without wiping your data.
-
-5. **Start the server:**
+3. Test sync execution:
    ```bash
    npm start
    ```
-   You should see `Brandigade HRIS running on port 4000`. Open `http://your-server:4000`
-   in a browser (or `http://localhost:4000` if running locally).
-
-6. **Log in** with the admin email/password from your `.env`, and set a new password
-   when prompted.
-
-That's it — the same server serves both the API and the web app, so there's nothing
-else to deploy separately.
+4. **Automate Execution**:
+   - **Windows**: Add a Task in **Task Scheduler** to run `node index.js` every 10 minutes.
+   - **Linux**: Add a `cron` job: `*/10 * * * * cd /path/to/sync-agent && node index.js >> sync.log 2>&1`.
 
 ---
 
-## Running it permanently (so it survives reboots / doesn't die when you close your terminal)
+## Seeding Employee Data
 
-Don't just leave `npm start` running in a terminal window for a real deployment — use a
-process manager. The simplest option is **pm2**:
-
-```bash
-npm install -g pm2
-cd hris/backend
-pm2 start src/server.js --name brandigade-hris
-pm2 save
-pm2 startup    # follow the printed instructions to enable auto-start on reboot
-```
-
-Useful pm2 commands:
-```bash
-pm2 logs brandigade-hris      # view logs
-pm2 restart brandigade-hris   # restart after an update
-pm2 stop brandigade-hris      # stop it
-```
-
-### Putting it behind a real domain (recommended)
-
-Right now this serves plain HTTP on port 4000. For real use, put it behind a reverse
-proxy (e.g. **Nginx** or **Caddy**) with a real domain and HTTPS (e.g. via Let's Encrypt/
-Certbot, or Caddy's automatic HTTPS). Logging in sends a password over the network — do
-not expose this directly over plain HTTP on the open internet.
-
-A minimal Caddy example (`Caddyfile`):
-```
-hris.brandigade.com {
-    reverse_proxy localhost:4000
-}
-```
-Caddy handles HTTPS automatically. Point your domain's DNS A record at your server's IP
-and run `caddy run`.
+To seed or import initial employee records:
+1. Provide your CSV/Excel employee sheet.
+2. Run the importer:
+   ```bash
+   npm run seed
+   ```
 
 ---
 
-## Day-to-day usage
-
-### Creating an employee account ("issuing a license")
-Admin → **Employees** → **+ Add Employee**. Fill in name, work email, designation,
-department, join date, and starting salary. You'll get a **temporary password** shown
-once — copy it and send it to the employee through a secure channel (not an unencrypted
-group chat ideally, but at minimum DM it rather than posting publicly). They'll be forced
-to set their own password the first time they log in.
-
-### Running payroll each month
-Admin → **Payroll** → pick the month/year → **Start / Open run**. This shows a draft
-preview calculated from attendance (unpaid absences reduce pay automatically). Add any
-bonus or extra deduction per employee, then **Finalize & generate payslips**. Once
-finalized, a run is locked — it can't be edited again — so check the preview numbers
-before finalizing. Employees can immediately see and download their payslip PDF from
-**My Payslips**.
-
-### Marking attendance
-Admin → **Attendance** → pick a date → choose a default status (Present is normal,
-use Holiday/Weekend on non-working days) → override specific people who were absent
-or half-day → **Apply to all active employees**. Do this once a day, or in a batch at
-the end of the month before running payroll — either works, since payroll just reads
-whatever attendance rows exist for that month.
-
-### Approving leave
-Admin → **Leave** shows every request across the company. Approve or reject pending
-ones. Approving automatically deducts the days from that employee's leave balance and
-marks those days as "leave" in attendance (so payroll won't dock their pay for them).
-
-### Salary increments
-Admin → **Employees** → **Manage** on the employee → enter a new salary and a reason →
-**Apply increment**. This updates their current salary going forward and keeps the old
-amount in their visible salary history.
-
----
-
-## Security checklist before you put real data in this
-
-- [ ] Changed `JWT_SECRET` in `.env` to a real random value (not the placeholder).
-- [ ] Changed the admin password from whatever was in `.env` (you'll be forced to on
-      first login, but make sure it's actually strong).
-- [ ] Running behind HTTPS (see reverse proxy section above) — don't run this on plain
-      HTTP if it's reachable from outside your office network.
-- [ ] The `backend/data/hris.db` file (and its `-wal`/`-shm` companion files) contains
-      everyone's salary and personal data. Back it up regularly, and make sure the
-      server itself is reasonably secured (normal OS-level hygiene: firewall, SSH key
-      auth, keep the OS patched).
-- [ ] `.env` is never committed to git or shared — it contains your JWT signing secret.
-- [ ] If you ever suspect a token was leaked, you can invalidate all sessions at once
-      by changing `JWT_SECRET` and restarting the server (this logs everyone out).
-
-## Backing up your data
-
-Everything lives in one file: `backend/data/hris.db` (plus `hris.db-wal` and
-`hris.db-shm` if present — copy all three together, or stop the server first to be safe).
-Copy that file somewhere safe on a schedule (a daily cron job running `cp` to another
-disk or cloud storage is enough for a team this size).
-
----
-
-## Project structure
-
-```
-hris/
-  backend/
-    src/
-      db/            SQLite schema + seed script
-      middleware/     Auth (JWT) checks
-      routes/         API endpoints (auth, employees, leave, attendance, payroll)
-      utils/          PDF payslip generator
-      server.js       Entry point — also serves the frontend
-    .env.example       Copy to .env and fill in
-    package.json
-  frontend/
-    public/
-      index.html       Single-page app shell
-      app.js            All frontend logic (no build step, no framework)
-```
-
-## Extending this later
-
-A few things you may want to add as Brandigade grows:
-- Email/WhatsApp notifications for leave approvals and new payslips.
-- A second admin tier ("HR" role that can't see salaries but can manage attendance/leave).
-- Proper Pakistan tax/EOBI deduction calculation built into payroll instead of manual overrides.
-- CSV export of payroll runs for your accountant.
-
-None of these require re-architecting anything — they're additive to the routes and
-schema that already exist.
+## License & Support
+Built for internal use at **Brandigade**. All rights reserved.

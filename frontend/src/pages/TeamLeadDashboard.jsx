@@ -59,37 +59,34 @@ export default function TeamLeadDashboard() {
   const fetchData = async () => {
     try {
       setLoading(true);
-      
-      // 1. Fetch team members (backend automatically filters to only show their campaign members)
-      const empRes = await api.get('/employees');
-      setTeamMembers(empRes.data);
 
-      // 2. Fetch campaigns (backend filters to led campaigns)
-      const campRes = await api.get('/campaigns');
-      setCampaigns(campRes.data);
-
-      const activeCampaign = campRes.data.find(c => c.status === 'active');
       const today = new Date();
       const currentMonth = today.getMonth() + 1;
       const currentYear = today.getFullYear();
-
-      // 3. Fetch team attendance (last 10 days for trends)
       const tenDaysAgo = new Date();
       tenDaysAgo.setDate(today.getDate() - 10);
-      const attRes = await api.get(`/attendance?startDate=${tenDaysAgo.toISOString().split('T')[0]}&endDate=${today.toISOString().split('T')[0]}`);
-      setAttendance(attRes.data);
+      const tenDaysAgoStr = tenDaysAgo.toISOString().split('T')[0];
+      const todayStr = today.toISOString().split('T')[0];
 
-      // 4. Fetch pending requests of team
-      const [leaveRes, halfdayRes, wfhRes] = await Promise.all([
+      // Fetch ALL data in parallel — employees, campaigns, attendance, and requests
+      const [empRes, campRes, attRes, leaveRes, halfdayRes, wfhRes] = await Promise.all([
+        api.get('/employees'),
+        api.get('/campaigns'),
+        api.get(`/attendance?startDate=${tenDaysAgoStr}&endDate=${todayStr}`),
         api.get('/requests/leave?status=pending'),
         api.get('/requests/halfday?status=pending'),
         api.get('/requests/wfh?status=pending')
       ]);
+
+      setTeamMembers(empRes.data);
+      setCampaigns(campRes.data);
+      setAttendance(attRes.data);
       setLeaves(leaveRes.data);
       setHalfdays(halfdayRes.data);
       setWfh(wfhRes.data);
 
-      // 5. Fetch campaign details and leaderboard
+      // Fetch campaign dashboard (depends on knowing which campaign is active)
+      const activeCampaign = campRes.data.find(c => c.status === 'active');
       if (activeCampaign) {
         const dashRes = await api.get(`/campaigns/${activeCampaign.id}/dashboard?month=${currentMonth}&year=${currentYear}`);
         setCampaignDashboard(dashRes.data);

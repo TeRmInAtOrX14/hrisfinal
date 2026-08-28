@@ -20,11 +20,13 @@ import {
   ChevronRight,
   Cpu,
   Sun,
-  Moon
+  Moon,
+  PhoneCall
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { useTheme } from '../utils/themeContext';
+import { openBrandigadeDialer } from '../utils/openDialer';
 
 export default function DashboardLayout() {
   const { theme, isDark, toggleTheme } = useTheme();
@@ -300,6 +302,16 @@ export default function DashboardLayout() {
           </div>
 
           <div className="flex items-center gap-4 relative">
+            {/* Brandigade Dialer Button */}
+            <button
+              onClick={openBrandigadeDialer}
+              className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-gradient-to-r from-brand-blue via-brand-violet to-brand-cyan text-brand-bg text-xs font-bold font-display uppercase tracking-wider shadow-lg hover:shadow-cyan-500/20 hover:scale-105 active:scale-95 transition-all duration-300 cursor-pointer border border-brand-cyan/30"
+              title="Launch Brandigade Dialer (App / Browser: dialer.brandigade.com)"
+            >
+              <PhoneCall className="w-3.5 h-3.5 animate-pulse" />
+              <span className="hidden sm:inline">Brandigade Dialer</span>
+            </button>
+
             {/* Theme Toggle */}
             <button
               onClick={toggleTheme}
