@@ -3,7 +3,7 @@ const express = require('express');
 const controller = require('../controllers/request');
 const validate = require('../middlewares/validate');
 const schemas = require('../schemas');
-const { requireAuth, requireRole, requireEmployeeProfile } = require('../middlewares/auth');
+const { requireAuth, requireRole, requireEmployeeProfile, requirePasswordChanged } = require('../middlewares/auth');
 
 const router = express.Router();
 
@@ -17,7 +17,12 @@ const router = express.Router();
  */
 const REVIEWERS = schemas.ADMIN_ROLES;
 
+// The first-login password change was enforced only by a redirect in the
+// SPA, so calling the API directly bypassed it entirely. Every route behind
+// auth now refuses until the password has actually been changed; /auth keeps
+// its own handling so the change endpoint itself stays reachable.
 router.use(requireAuth);
+router.use(requirePasswordChanged);
 
 for (const [path, kind] of [
   ['leave', 'Leave'],

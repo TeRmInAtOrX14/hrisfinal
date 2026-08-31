@@ -4,7 +4,7 @@ const multer = require('multer');
 const controller = require('../controllers/document');
 const validate = require('../middlewares/validate');
 const schemas = require('../schemas');
-const { requireAuth, requireRole } = require('../middlewares/auth');
+const { requireAuth, requireRole, requirePasswordChanged } = require('../middlewares/auth');
 
 const router = express.Router();
 const ADMIN = schemas.ADMIN_ROLES;
@@ -35,7 +35,12 @@ const upload = multer({
   },
 });
 
+// The first-login password change was enforced only by a redirect in the
+// SPA, so calling the API directly bypassed it entirely. Every route behind
+// auth now refuses until the password has actually been changed; /auth keeps
+// its own handling so the change endpoint itself stays reachable.
 router.use(requireAuth);
+router.use(requirePasswordChanged);
 
 router.get('/', controller.getDocuments);
 router.get('/:id/download', controller.getDocumentDownloadUrl);

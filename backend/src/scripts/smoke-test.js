@@ -409,6 +409,38 @@ async function main() {
   });
   check('can log in with the new password', reLogin.status === 200);
 
+  console.log('\n=== ADMIN PASSWORD RESET ===');
+  // Before this existed there was no recovery path at all: no forgot-password
+  // flow, no reset, so a forgotten password meant editing the database.
+  const sdrReset = await api('POST', `/employees/${sdr.emp.id}/reset-password`, { token: sdrToken });
+  check('an SDR cannot reset anyone password', sdrReset.status === 403);
+
+  const reset = await api('POST', `/employees/${sdr.emp.id}/reset-password`, { token: adminToken });
+  check('admin can reset an employee password', reset.status === 200);
+  check(
+    'the reset returns a password once',
+    typeof reset.data?.password === 'string' && reset.data.password.length >= 16,
+    JSON.stringify(reset.data).slice(0, 120)
+  );
+
+  const oldPassword = await api('POST', '/auth/login', {
+    body: { email: sdr.user.email, password: 'BrandNewPass99' },
+  });
+  check('the previous password stops working after a reset', oldPassword.status === 401);
+
+  const withReset = await api('POST', '/auth/login', {
+    body: { email: sdr.user.email, password: reset.data?.password },
+  });
+  check('the generated password signs in', withReset.status === 200);
+  check(
+    'a reset account is forced to change its password again',
+    withReset.data?.user?.mustChangePassword === true
+  );
+
+  // The whole point of the flag: an admin-issued password must not stay usable.
+  const blocked = await api('GET', '/employees', { token: withReset.data?.accessToken });
+  check('a reset account is blocked until it changes the password', blocked.status === 403);
+
   console.log(`\n${'='.repeat(60)}`);
   console.log(`RESULTS: ${pass} passed, ${fail} failed`);
   if (failures.length) console.log('Failed:', failures.join(' | '));

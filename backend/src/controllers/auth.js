@@ -1,3 +1,5 @@
+const crypto = require('crypto');
+
 const bcrypt = require('bcryptjs');
 const { OAuth2Client } = require('google-auth-library');
 
@@ -145,11 +147,34 @@ exports.googleLogin = async (req, res, next) => {
 
     let user = existing;
     if (!user.googleId && payload.sub) {
+      // Signing in with Google satisfies the first-login password change, and
+      // must also retire the password that satisfied it before.
+      //
+      // Without this the account is unusable: every route is blocked until the
+      // password changes, and the change endpoint asks for a current password
+      // the employee never had. Simply clearing the flag is not enough either
+      // -- the admin-issued password would stay live, and keeping the admin
+      // able to sign in as the employee is precisely what the flag exists to
+      // prevent. So it is replaced with a random value nobody holds. The
+      // employee signs in with Google from here; an admin reset issues a new
+      // password if they ever want one.
+      const retired = user.mustChangePassword
+        ? await bcrypt.hash(crypto.randomBytes(32).toString('hex'), await bcrypt.genSalt(12))
+        : user.passwordHash;
+
       user = await prisma.user.update({
         where: { id: user.id },
-        data: { googleId: payload.sub },
+        data: {
+          googleId: payload.sub,
+          mustChangePassword: false,
+          passwordHash: retired,
+        },
         include: { employee: true },
       });
+
+      if (existing.mustChangePassword) {
+        await logAudit(user.id, 'GOOGLE_LINK_RETIRED_INITIAL_PASSWORD', 'User', user.id);
+      }
     } else if (user.googleId && payload.sub && user.googleId !== payload.sub) {
       // The address matches a staff account but the Google identity behind it
       // changed — refuse rather than silently re-binding the account.

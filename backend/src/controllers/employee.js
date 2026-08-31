@@ -1,3 +1,5 @@
+const crypto = require('crypto');
+
 const bcrypt = require('bcryptjs');
 
 const prisma = require('../lib/prisma');
@@ -415,6 +417,59 @@ exports.deleteEmployee = async (req, res, next) => {
     });
 
     res.json({ message: 'Employee and all associated records deleted permanently.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * Issue a new password for an employee who cannot get in.
+ *
+ * There was no recovery path at all: no forgot-password flow, no reset, and no
+ * way for an admin to help. Once someone changed their password and forgot it,
+ * the only way back was editing the database by hand.
+ *
+ * The new password is generated rather than chosen by the admin, shown exactly
+ * once, and the account is flagged to change it at next sign-in, so the admin
+ * does not retain a working credential for someone else's account. Existing
+ * sessions are revoked, since a reset usually means the account is in the wrong
+ * hands or unreachable.
+ */
+exports.resetEmployeePassword = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const employee = await prisma.employee.findUnique({ where: { id }, include: { user: true } });
+    if (!employee) {
+      return res.status(404).json({ error: 'Employee not found' });
+    }
+
+    if (!employee.user.isActive) {
+      return res.status(409).json({ error: 'This account is deactivated. Reactivate it before resetting the password.' });
+    }
+
+    // 20 characters of base64url, comfortably clearing the password policy.
+    const password = crypto.randomBytes(15).toString('base64url');
+    const passwordHash = await bcrypt.hash(password, await bcrypt.genSalt(12));
+
+    await prisma.user.update({
+      where: { id: employee.userId },
+      data: { passwordHash, mustChangePassword: true, refreshToken: null },
+    });
+
+    // logAudit redacts credentials, so the generated password is not written to
+    // the audit trail.
+    await logAudit(req.user.id, 'RESET_EMPLOYEE_PASSWORD', 'Employee', id, {
+      fullName: employee.fullName,
+      employeeCode: employee.employeeCode,
+    });
+
+    res.json({
+      message: 'Password reset. Give this to the employee — it is shown once and cannot be retrieved again.',
+      email: employee.user.email,
+      password,
+      mustChangePassword: true,
+    });
   } catch (err) {
     next(err);
   }
