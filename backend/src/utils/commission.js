@@ -32,19 +32,22 @@ const DEFAULT_TL_LADDER = [
 ];
 
 /**
- * Campaigns the ladder applies to. Anything not listed falls back to the
- * campaign's own configured slab table, matched on the team average.
+ * Campaigns the ladder applies to.
  *
- * This list used to be a literal array inside the payroll loop, which meant
- * onboarding a campaign required a code change and a redeploy.
+ * The ladder is company-wide policy: Team Lead commission is the same on every
+ * campaign. '*' means exactly that, so onboarding a campaign needs no change
+ * here — which was the point of moving this out of the payroll loop, where it
+ * was a literal array and a new campaign meant a code change and a redeploy.
+ *
+ * It stayed an explicit list for a while, and that quietly cost money: a lead
+ * on a campaign missing from the list fell through to the campaign's own slab
+ * table and, with no structure configured, earned nothing.
+ *
+ * Override with TEAM_LEAD_LADDER_CAMPAIGNS (JSON array) to restrict it again.
+ * Anything not covered falls back to the campaign's slab table, matched on the
+ * team average.
  */
-const DEFAULT_TL_CAMPAIGNS = [
-  'LVGL',
-  'CLEO HR',
-  'PATIENT WING',
-  'LOGICS',
-  'BRANDIGADE OUTREACH',
-];
+const DEFAULT_TL_CAMPAIGNS = ['*'];
 
 function parseJsonEnv(name, fallback) {
   const raw = process.env[name];
@@ -120,9 +123,12 @@ function describeSlabCommission(slab, showups) {
   }
 }
 
+const LADDER_COVERS_EVERY_CAMPAIGN = TL_CAMPAIGNS.includes('*');
+
 function usesLadder(campaignName) {
+  if (LADDER_COVERS_EVERY_CAMPAIGN) return true;
   const name = String(campaignName || '').toUpperCase();
-  return TL_CAMPAIGNS.some((target) => name.includes(target));
+  return name !== '' && TL_CAMPAIGNS.some((target) => name.includes(target));
 }
 
 /**

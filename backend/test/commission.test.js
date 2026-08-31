@@ -43,13 +43,50 @@ test('an unmatched slab pays nothing', () => {
   assert.equal(calculateSlabCommission(null, 25), 0);
 });
 
-test('ladder campaigns are matched case-insensitively, including compound names', () => {
-  assert.equal(usesLadder('LVGL'), true);
-  assert.equal(usesLadder('lvgl'), true);
-  assert.equal(usesLadder('Logics and Patient Wing'), true);
-  assert.equal(usesLadder('Creaform 3D'), false);
-  assert.equal(usesLadder(''), false);
-  assert.equal(usesLadder(null), false);
+test('the Team Lead ladder is company-wide, so it covers every campaign', () => {
+  // It used to be an explicit list, and a lead on a campaign missing from it
+  // silently earned nothing.
+  for (const name of ['LVGL', 'Logics', 'Patient Wing', 'Kloudlyn', 'Creaform 3D', 'Kline AI']) {
+    assert.equal(usesLadder(name), true, name + ' should use the ladder');
+  }
+});
+
+// The SDR bands as configured by set-commission-structures.js. Rates are paid
+// on the total show-ups at whichever band the total lands in, not marginally.
+const SDR_BANDS = [
+  { minShowups: 1, maxShowups: 3, rate: 3000, type: 'per_showup' },
+  { minShowups: 4, maxShowups: 6, rate: 4000, type: 'per_showup' },
+  { minShowups: 7, maxShowups: null, rate: 5000, type: 'per_showup' },
+];
+
+const sdrPayout = (showups) =>
+  calculateSlabCommission(matchSlab(SDR_BANDS, showups), showups);
+
+test('SDR commission pays the band rate on the whole total', () => {
+  assert.equal(sdrPayout(3), 9000, '3 x 3,000');
+  assert.equal(sdrPayout(6), 24000, '6 x 4,000');
+  assert.equal(sdrPayout(9), 45000, '9 x 5,000');
+});
+
+test('SDR band boundaries land on the right rate', () => {
+  assert.equal(sdrPayout(1), 3000);
+  assert.equal(sdrPayout(4), 16000, 'first show-up of the middle band pays 4,000 on all four');
+  assert.equal(sdrPayout(7), 35000, 'first show-up of the top band pays 5,000 on all seven');
+});
+
+test('crossing into a band raises the rate on every show-up, not just the new one', () => {
+  // The jump from 3 to 4 is worth more than one show-up at the old rate.
+  assert.equal(sdrPayout(4) - sdrPayout(3), 7000);
+});
+
+test('beyond the top band each additional show-up still pays 5,000', () => {
+  assert.equal(sdrPayout(10), 50000);
+  assert.equal(sdrPayout(20), 100000);
+  assert.equal(sdrPayout(15) - sdrPayout(14), 5000);
+});
+
+test('no show-ups means no SDR commission', () => {
+  assert.equal(sdrPayout(0), 0);
 });
 
 test('the Team Lead ladder pays on show-ups per member, plus one', () => {
@@ -69,13 +106,6 @@ test('no team means no Team Lead commission', () => {
   assert.equal(calculateTeamLeadCommission({ campaignName: 'LVGL', teamShowups: 100, teamSize: 0 }), 0);
 });
 
-test('non-ladder campaigns use the campaign slab table on the team average', () => {
-  // Average of 12 lands in the 10-19 band at 1500, paid on the team total.
-  const payout = calculateTeamLeadCommission({
-    campaignName: 'Creaform 3D',
-    teamShowups: 48,
-    teamSize: 4,
-    slabs: SLABS,
-  });
-  assert.equal(payout, 48 * 1500);
-});
+// The fallback to a campaign's own slab table only applies when the ladder has
+// been restricted, so it is covered in commission-restricted-ladder.test.js,
+// which sets the override before loading the module.
