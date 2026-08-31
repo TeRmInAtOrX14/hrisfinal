@@ -10,6 +10,7 @@
     "dev": "node --no-warnings --watch src/server.js",
     "seed": "node --no-warnings src/db/seed.js",
     "smoke": "node --no-warnings src/scripts/smoke-test.js",
+    "test": "node --test \"test/**/*.test.js\"",
     "migrate:deploy": "prisma migrate deploy",
     "migrate:dev": "prisma migrate dev",
     "prisma:generate": "prisma generate",

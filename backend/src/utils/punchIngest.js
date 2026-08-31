@@ -1,6 +1,6 @@
 const prisma = require('../lib/prisma');
 const {
-  officeDateMidnight,
+  officeShiftDate,
   computeDayMetrics,
 } = require('./attendanceTime');
 
@@ -108,7 +108,9 @@ async function processBatchPunches(punches) {
       continue;
     }
 
-    const dateMidnight = officeDateMidnight(punchTime);
+    // Not the calendar date: a 19:00 -> 03:00 shift would otherwise be split
+    // across two rows, losing the check-out and inventing a present day.
+    const dateMidnight = officeShiftDate(punchTime, emp);
     const key = `${emp.id}_${dateMidnight.toISOString().slice(0, 10)}`;
 
     let entry = dayMap.get(key);

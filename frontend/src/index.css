@@ -74,6 +74,15 @@
 
 /* Custom Base Layer / Global Styles */
 @layer base {
+  /* The <body> tag used to carry `selection:bg-orange-500` as a Tailwind
+     utility, which outranked this layer and left an orange that appears
+     nowhere else in the palette. Selection is themed here instead, so it
+     follows light and dark like everything else. */
+  ::selection {
+    background: var(--color-brand-blue);
+    color: #ffffff;
+  }
+
   body {
     background-color: var(--color-brand-bg);
     color: var(--color-brand-text);

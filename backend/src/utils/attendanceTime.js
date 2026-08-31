@@ -56,6 +56,51 @@ function officeMinutesOfDay(date) {
   return hour * 60 + minute;
 }
 
+/**
+ * The shift window for an employee, in minutes since local midnight.
+ *
+ * `crossesMidnight` is true for a night shift such as 19:00 -> 03:00, where the
+ * end time is numerically less than the start. `duration` is the real length of
+ * the shift in minutes, unwrapped across midnight.
+ */
+function shiftWindow(employee) {
+  const start = timeToMinutes(employee?.shiftStart) ?? DEFAULT_SHIFT_START;
+  const end = timeToMinutes(employee?.shiftEnd) ?? DEFAULT_SHIFT_END;
+  const duration = (end - start + 1440) % 1440 || 1440;
+  return { start, end, duration, crossesMidnight: end <= start };
+}
+
+/**
+ * The attendance day a punch belongs to, which is not always its calendar date.
+ *
+ * Most of the workforce is on 19:00 -> 03:00. Grouping strictly by calendar date
+ * split one shift across two rows: an evening row holding only a check-in, and a
+ * phantom "present" row at 3am holding only a check-out. Overtime and early
+ * departure were therefore always zero for night staff, and present-days roughly
+ * doubled -- which feeds the attendance and punctuality allowances in payroll.
+ *
+ * For a shift that crosses midnight the boundary moves from midnight to the
+ * midpoint of the off-shift gap: for 19:00 -> 03:00 that is 11:00, so anything
+ * before 11:00 is attributed to the previous day's shift. That leaves roughly
+ * eight hours of slack on either side, so late departures and early arrivals
+ * both land on the right day.
+ */
+function officeShiftDate(date, employee) {
+  const day = officeDateMidnight(date);
+  const { start, end, crossesMidnight } = shiftWindow(employee);
+  if (!crossesMidnight) return day;
+
+  const gap = (start - end + 1440) % 1440;
+  const boundary = (end + Math.floor(gap / 2)) % 1440;
+
+  if (officeMinutesOfDay(date) < boundary) {
+    const previous = new Date(day);
+    previous.setUTCDate(previous.getUTCDate() - 1);
+    return previous;
+  }
+  return day;
+}
+
 /** "09:30" -> 570. Returns null for anything unparseable. */
 function timeToMinutes(value) {
   if (typeof value !== 'string') return null;
@@ -87,20 +132,28 @@ const DEFAULT_GRACE = 15;
  * with a 15-minute grace scores 0, arriving 20 minutes late scores the full 20.
  */
 function computeDayMetrics(employee, checkIn, checkOut) {
-  const shiftStart = timeToMinutes(employee?.shiftStart) ?? DEFAULT_SHIFT_START;
-  const shiftEnd = timeToMinutes(employee?.shiftEnd) ?? DEFAULT_SHIFT_END;
+  const { start, duration } = shiftWindow(employee);
   const grace = Number.isInteger(employee?.graceMinutes) ? employee.graceMinutes : DEFAULT_GRACE;
+
+  // Minutes from the shift's start, unwrapped so a shift crossing midnight is a
+  // continuous line rather than two fragments either side of 00:00. Anything
+  // more than 12 hours "after" the start is really before it -- an early
+  // arrival, not a 13-hour late one.
+  const fromShiftStart = (instant) => {
+    const raw = (officeMinutesOfDay(instant) - start + 1440) % 1440;
+    return raw > 720 ? raw - 1440 : raw;
+  };
 
   let late = 0;
   if (checkIn) {
-    const diff = officeMinutesOfDay(checkIn) - shiftStart;
+    const diff = fromShiftStart(checkIn);
     if (diff > grace) late = diff;
   }
 
   let earlyDeparture = 0;
   let overtime = 0;
   if (checkOut) {
-    const diff = officeMinutesOfDay(checkOut) - shiftEnd;
+    const diff = fromShiftStart(checkOut) - duration;
     if (diff < 0) earlyDeparture = Math.abs(diff);
     else overtime = diff;
   }
@@ -139,6 +192,8 @@ module.exports = {
   zonedParts,
   officeDateMidnight,
   officeMinutesOfDay,
+  officeShiftDate,
+  shiftWindow,
   timeToMinutes,
   toDateOnly,
   computeDayMetrics,
