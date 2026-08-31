@@ -6,61 +6,58 @@ recorded in the git history and no longer duplicated in a document.
 
 ---
 
-# Deployment — in progress
+# Deployment
 
-The app is built, tested and packaged. It is **not live yet**, blocked on one
-thing.
+The app is packaged and ready to upload. The database connection problem that
+held this up is **resolved**.
 
-## The blocker
+## The constraint
 
-Namecheap shared hosting (`premium310-2.web-hosting.com`, 162.254.39.68) allows
-outbound HTTPS but **blocks outbound PostgreSQL ports**. Verified from the
-server itself: port 443 succeeds, 5432 and 6543 both time out. This is a host
-firewall, not a configuration error — the databases involved are healthy and
-reachable from other networks.
+Namecheap shared hosting (`premium310-2.web-hosting.com`) permits outbound HTTPS
+but blocks outbound PostgreSQL. Verified on the server itself: port 443
+succeeds, while port 5432 times out to Supabase *and* to Prisma — two unrelated
+providers in different IP ranges. It is port-based filtering, so no choice of
+database provider gets around it over TCP.
 
-## What has been tried
+## The resolution
 
-| Attempt | Result |
+The database moved to **Prisma Postgres** (`hris-production`, us-west-1),
+reached over HTTPS on port 443:
+
+| Variable | Form | Used by |
+|---|---|---|
+| `DATABASE_URL` | `prisma+postgres://accelerate.prisma-data.net/?api_key=…` | the app on cPanel |
+| `DIRECT_URL` | `postgres://…@db.prisma.io:5432/…` | `prisma migrate` and `npm run seed`, run locally |
+
+`src/lib/prisma.js` selects the transport from the URL prefix, so one build
+serves both. The full smoke suite passes **54/54 over the HTTPS transport**.
+
+Supabase remains, but only as **file storage** for payslip PDFs and employee
+documents — that is HTTPS and unaffected. Its Postgres database is now unused.
+
+## Dead ends, recorded so they are not retried
+
+| Attempt | Why it failed |
 |---|---|
-| Supabase direct host `db.<ref>.supabase.co:5432` | Dead end — publishes an IPv6 address only, and the host has no IPv6 |
-| Supabase session/transaction pooler (IPv4) | Correct fix for IPv6, but ports 5432/6543 are blocked |
-| Prisma Accelerate as an HTTPS proxy | The `prisma platform` CLI that managed it has been removed from current Prisma |
-| Prisma Postgres (`hris-production`, us-west-1) | Created, but the CLI only issues `postgres://pooled.db.prisma.io:5432` TCP URLs — same blocked port |
+| Supabase direct host `db.<ref>.supabase.co:5432` | Publishes an IPv6 address only; the host has no IPv6 |
+| Supabase session and transaction poolers | IPv4, but ports 5432/6543 are blocked |
+| Prisma Accelerate in front of Supabase | The `prisma platform` CLI that managed it was removed from current Prisma |
+| `prisma postgres create` / `connection create` | Only ever issue TCP URLs on port 5432 |
+| `prisma+postgres://db.prisma.io/?api_key=…` | Returns 404 — the HTTPS host is `accelerate.prisma-data.net` |
 
-`src/lib/prisma.js` already selects its transport from the `DATABASE_URL`
-prefix: `prisma://` or `prisma+postgres://` routes over HTTPS, anything else
-connects directly. Verified that `@prisma/client` 5.22 accepts both HTTPS
-prefixes — they reach the endpoint and return `P6002` for an invalid key — so
-no Prisma upgrade is needed if an HTTPS connection string can be obtained.
+The HTTPS connection string is not exposed by the CLI at all. It comes from
+console.prisma.io, under the database's connection strings.
 
-## Open routes to resolve it
+## Still to do
 
-1. **Test whether the block is port-based or destination-based.** Run the
-   reachability check against `pooled.db.prisma.io:5432`. If it is open, the
-   Prisma Postgres TCP URL works as-is and this is solved.
-2. **Get the `prisma+postgres://...?api_key=...` form from console.prisma.io.**
-   The database has a connection named "Prisma Postgres API Key"; the CLI does
-   not expose its value, but the web console may.
-3. **Namecheap support.** They confirmed outbound 27017 (MongoDB) is open, so
-   the platform does allow outbound database ports selectively. Worth pressing
-   for 5432/6543.
-4. **A VPS**, which removes the restriction entirely.
-
-## Resources created
-
-- Prisma project `hirs` (`proj_cmth9met5ak3wyoe3nkwrl5i0`), workspace "Personal workspace"
-- Prisma Postgres database `hris-production` (`db_i5zq4gdyordy0rpbfk6iq35m`), us-west-1
-- Supabase project `HRIS` (`ycnlcigdcuahqmlwoltz`), ap-northeast-1 — schema applied, **empty**,
-  and still the store for payslip and document files regardless of where the tables end up
-
-## Not blocked by any of the above
-
-- `prisma migrate deploy` and `npm run seed` run from a machine with a normal
-  connection, never from the host. The Supabase schema is already applied.
-- Google sign-in still needs `https://hris.brandigade.com` added to the OAuth
-  client's authorised JavaScript origins.
-- The office sync agent needs `HRIS_API_URL=https://hris.brandigade.com/api`.
+- **Rotate the Prisma Postgres credentials.** They were pasted into a chat
+  transcript during setup. Use `prisma postgres connection rotate`, then update
+  `backend/.env` and redeploy.
+- Add `https://hris.brandigade.com` to the Google OAuth client's authorised
+  JavaScript origins, or Google sign-in fails.
+- Point the office sync agent at `https://hris.brandigade.com/api`.
+- Delete the unused Supabase database, and the first Prisma Postgres database
+  created by mistake during setup.
 - Email is disabled — `SMTP_*` is blank, so nothing is sent. In-app
   notifications work.
 
