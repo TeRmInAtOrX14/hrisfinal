@@ -1,0 +1,168 @@
+name: Deploy
+
+# Every push to main is verified, then shipped to cPanel. Nothing is zipped or
+# uploaded by hand.
+#
+# The frontend is built here rather than on the server: cPanel has no build
+# step, and installing Vite plus its dev dependencies on shared hosting is both
+# slow and unnecessary.
+#
+# Migrations also run from here. The cPanel host cannot open outbound
+# PostgreSQL connections (Namecheap blocks 5432), but a GitHub runner can, so
+# schema changes are applied from CI rather than from the app server.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Two deploys overlapping would interleave rsync with a Passenger restart.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Unit tests
+        working-directory: backend
+        run: npm test
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Fail if the build produced nothing
+        run: test -f frontend/dist/index.html
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 5
+
+  migrate:
+    name: Apply migrations
+    needs: verify
+    runs-on: ubuntu-latest
+    env:
+      DIRECT_URL: ${{ secrets.DIRECT_URL }}
+      DATABASE_URL: ${{ secrets.DIRECT_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Skip when no database secret is configured
+        id: guard
+        run: echo "ready=${{ env.DIRECT_URL != '' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install backend dependencies
+        if: steps.guard.outputs.ready == 'true'
+        working-directory: backend
+        run: npm ci
+
+      # `migrate deploy` only applies migrations that have not run yet, and
+      # never resets or drops anything.
+      - name: prisma migrate deploy
+        if: steps.guard.outputs.ready == 'true'
+        working-directory: backend
+        run: npx prisma migrate deploy
+
+  deploy:
+    name: Ship to cPanel
+    needs: [verify, migrate]
+    runs-on: ubuntu-latest
+    # Skip cleanly until the cPanel variables are configured, so a repository
+    # without them still gets tests and a build rather than a red failure.
+    if: ${{ vars.CPANEL_APP_PATH != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Authorise the deploy key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.CPANEL_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "${{ secrets.CPANEL_SSH_PORT }}" -H "${{ secrets.CPANEL_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # Each rsync targets one directory and deletes only within it, so
+      # backend/.env and backend/node_modules on the server are never touched.
+      - name: Sync backend source
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/id_deploy -p ${{ secrets.CPANEL_SSH_PORT }}" \
+            backend/src/ \
+            "${{ secrets.CPANEL_USER }}@${{ secrets.CPANEL_HOST }}:${{ vars.CPANEL_APP_PATH }}/backend/src/"
+
+      - name: Sync Prisma schema and migrations
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/id_deploy -p ${{ secrets.CPANEL_SSH_PORT }}" \
+            backend/prisma/ \
+            "${{ secrets.CPANEL_USER }}@${{ secrets.CPANEL_HOST }}:${{ vars.CPANEL_APP_PATH }}/backend/prisma/"
+
+      - name: Sync package manifests
+        run: |
+          rsync -az \
+            -e "ssh -i ~/.ssh/id_deploy -p ${{ secrets.CPANEL_SSH_PORT }}" \
+            backend/package.json backend/package-lock.json \
+            "${{ secrets.CPANEL_USER }}@${{ secrets.CPANEL_HOST }}:${{ vars.CPANEL_APP_PATH }}/backend/"
+
+      - name: Sync the built frontend
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/id_deploy -p ${{ secrets.CPANEL_SSH_PORT }}" \
+            frontend/dist/ \
+            "${{ secrets.CPANEL_USER }}@${{ secrets.CPANEL_HOST }}:${{ vars.CPANEL_APP_PATH }}/frontend/dist/"
+
+      # npm ci regenerates the Prisma client through the postinstall hook, which
+      # is what produces the correct Linux query engine on the server.
+      - name: Install production dependencies and restart
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "${{ secrets.CPANEL_SSH_PORT }}" \
+            "${{ secrets.CPANEL_USER }}@${{ secrets.CPANEL_HOST }}" \
+            "source ${{ vars.CPANEL_NODEVENV_ACTIVATE }} && cd ${{ vars.CPANEL_APP_PATH }}/backend && npm ci --omit=dev && mkdir -p tmp && touch tmp/restart.txt"
+
+      - name: Wait for the app to come back
+        run: sleep 15
+
+      - name: Health check
+        run: |
+          for attempt in 1 2 3 4 5; do
+            body=$(curl -fsS --max-time 30 "https://${{ vars.APP_HOST }}/api/health" || true)
+            echo "attempt $attempt: $body"
+            case "$body" in
+              *'"database":"up"'*) echo "Deploy verified."; exit 0 ;;
+            esac
+            sleep 10
+          done
+          echo "Health check never reported a healthy database."
+          exit 1

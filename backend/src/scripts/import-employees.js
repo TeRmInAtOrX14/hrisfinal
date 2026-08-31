@@ -32,6 +32,17 @@ const ROLES = ['Admin', 'CEO', 'COO', 'Team Lead', 'SDR', 'Employee'];
 const CAMPAIGN_ROLES = ['team_lead', 'sdr'];
 const STATUSES = ['active', 'on_leave', 'terminated', 'resigned'];
 
+/**
+ * Campaigns for one row. A Team Lead can run more than one, so the column takes
+ * a semicolon-separated list: "Logics;Patient Wing" produces a membership in
+ * each, with the same campaignRole.
+ */
+const campaignsOf = (row) =>
+  String(row.campaign || '')
+    .split(';')
+    .map((name) => name.trim())
+    .filter(Boolean);
+
 const args = process.argv.slice(2);
 const file = args.find((a) => !a.startsWith('--'));
 const COMMIT = args.includes('--commit');
@@ -160,7 +171,7 @@ async function main() {
   }
   console.log('Validation passed.\n');
 
-  const wanted = [...new Set(rows.map((r) => r.campaign).filter(Boolean))];
+  const wanted = [...new Set(rows.flatMap(campaignsOf))];
   const existingCampaigns = await prisma.campaign.findMany({ where: { name: { in: wanted } } });
   const campaignByName = new Map(existingCampaigns.map((c) => [c.name, c]));
   const missing = wanted.filter((n) => !campaignByName.has(n));
@@ -262,21 +273,25 @@ async function main() {
   // Campaign membership last, and it never writes User.role: assigning someone
   // to a campaign used to overwrite their account role and lock admins out.
   for (const r of toCreate) {
-    if (!r.campaign) continue;
     const employee = createdByCode.get(r.employeeCode);
-    const campaign = campaignByName.get(r.campaign);
-    if (!employee || !campaign) continue;
+    if (!employee) continue;
 
-    await prisma.campaignMember.upsert({
-      where: { campaignId_employeeId: { campaignId: campaign.id, employeeId: employee.id } },
-      update: { role: r.campaignRole || 'sdr', status: 'active' },
-      create: {
-        campaignId: campaign.id,
-        employeeId: employee.id,
-        role: r.campaignRole || 'sdr',
-        status: 'active',
-      },
-    });
+    for (const name of campaignsOf(r)) {
+      const campaign = campaignByName.get(name);
+      if (!campaign) continue;
+
+      await prisma.campaignMember.upsert({
+        where: { campaignId_employeeId: { campaignId: campaign.id, employeeId: employee.id } },
+        update: { role: r.campaignRole || 'sdr', status: 'active' },
+        create: {
+          campaignId: campaign.id,
+          employeeId: employee.id,
+          role: r.campaignRole || 'sdr',
+          status: 'active',
+        },
+      });
+      console.log('  ' + r.employeeCode + ' -> ' + name + ' (' + (r.campaignRole || 'sdr') + ')');
+    }
   }
 
   const out = path.resolve('import-credentials.csv');

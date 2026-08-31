@@ -6,3 +6,7 @@ node_modules/
 # Generated payslip PDFs must never be committed.
 *.pdf
 dist/
+
+# Generated account passwords from src/scripts/import-employees.js.
+# Distribute, then delete. Never commit.
+import-credentials.csv

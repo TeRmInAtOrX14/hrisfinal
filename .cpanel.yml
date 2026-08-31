@@ -1,0 +1,29 @@
+---
+# Fallback deploy for cPanel's built-in Git Version Control, for when SSH is
+# unavailable and the GitHub Actions workflow cannot be used.
+#
+# Clone this repository in cPanel once, then press "Deploy HEAD Commit" after
+# each push.
+#
+# Two things this CANNOT do, both by cPanel's own limits:
+#
+#   * Build the front end. cPanel has no build step, so a front-end change still
+#     needs `npm run build` locally and frontend/dist uploaded separately.
+#   * Run migrations. This host cannot open outbound PostgreSQL connections, so
+#     run `npx prisma migrate deploy` from a machine that can.
+#
+# See docs/DEPLOYMENT.md. The GitHub Actions workflow handles all of the above
+# and is the preferred path.
+deployment:
+  tasks:
+    - export APP=/home/brandcto/hris/backend
+
+    # Application code and schema only. Never .env, never node_modules.
+    - /bin/rsync -a --delete backend/src/ $APP/src/
+    - /bin/rsync -a --delete backend/prisma/ $APP/prisma/
+    - /bin/cp backend/package.json $APP/package.json
+    - /bin/cp backend/package-lock.json $APP/package-lock.json
+
+    # Passenger reloads the app when this file's timestamp changes.
+    - /bin/mkdir -p $APP/tmp
+    - /bin/touch $APP/tmp/restart.txt
