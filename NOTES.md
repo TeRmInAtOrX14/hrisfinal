@@ -53,8 +53,20 @@ console.prisma.io, under the database's connection strings.
 - **Rotate the Prisma Postgres credentials.** They were pasted into a chat
   transcript during setup. Use `prisma postgres connection rotate`, then update
   `backend/.env` and redeploy.
-- Add `https://hris.brandigade.com` to the Google OAuth client's authorised
-  JavaScript origins, or Google sign-in fails.
+- ~~Add `https://hris.brandigade.com` to the Google OAuth client's authorised
+  JavaScript origins~~ — done, verified 2026-09-01 (GSI builds the auth URL
+  without an origin error on the live login page).
+- **If staff still cannot finish Google sign-in**, check the OAuth consent
+  screen's *publishing status* in Google Cloud Console. While it is "Testing",
+  Google blocks every account that is not on the test-user list *after* the
+  account picker, regardless of anything in this codebase. Set it to
+  "In production" (the app only requests openid/email/profile, so no
+  verification review is needed).
+- Two SDR user accounts are deactivated (`isActive=false`) while their employee
+  records are active: `arhambrandigade1@gmail.com` (EMP-1006) and
+  `emaazbrandigade@gmail.com` (EMP-1004). They cannot sign in by any method
+  until an admin re-enables "Login Status" in the employee edit form — flip it
+  if the deactivation was not deliberate.
 - Point the office sync agent at `https://hris.brandigade.com/api`.
 - Delete the unused Supabase database, and the first Prisma Postgres database
   created by mistake during setup.

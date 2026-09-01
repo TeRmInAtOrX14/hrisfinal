@@ -9,7 +9,9 @@ import {
   Trash2,
   Loader2,
   Clock,
-  Pencil
+  Pencil,
+  KeyRound,
+  Copy
 } from 'lucide-react';
 import api, { session, apiError } from '../utils/api';
 import toast from 'react-hot-toast';
@@ -50,6 +52,9 @@ export default function Employees() {
   // Modals
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [detailEmployee, setDetailEmployee] = useState(null);
+  // { email, password } from a reset — shown exactly once, never refetchable.
+  const [resetResult, setResetResult] = useState(null);
+  const [resetting, setResetting] = useState(false);
 
   const currentUser = session.user || { role: 'Employee' };
   const isAdmin = isAdminRole(currentUser);
@@ -177,6 +182,30 @@ export default function Employees() {
       } catch (e) {
         toast.error(apiError(e, 'Termination failed.'));
       }
+    }
+  };
+
+  const handleResetPassword = async (emp) => {
+    if (!confirm(`Reset the password for ${emp.fullName}? Their current password and active sessions stop working immediately, and a new one-time password is shown to you exactly once.`)) {
+      return;
+    }
+    try {
+      setResetting(true);
+      const res = await api.post(`/employees/${emp.id}/reset-password`);
+      setResetResult({ fullName: emp.fullName, email: res.data.email, password: res.data.password });
+    } catch (e) {
+      toast.error(apiError(e, 'Password reset failed.'));
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  const copyResetPassword = async () => {
+    try {
+      await navigator.clipboard.writeText(resetResult.password);
+      toast.success('Password copied to clipboard.');
+    } catch {
+      toast.error('Could not copy — select the password and copy it manually.');
     }
   };
 
@@ -388,12 +417,16 @@ export default function Employees() {
 
                   <h4 className="text-xs font-bold text-brand-text uppercase tracking-widest font-display">Salary & Shift Details</h4>
                   <div className="p-4 rounded-2xl bg-brand-bg border border-brand-border grid grid-cols-2 gap-4">
-                    <div>
-                      <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">Base Salary</p>
-                      <p className="text-xs text-brand-cyan font-bold mt-1 font-mono">
-                        {money(detailEmployee.baseSalary, detailEmployee.currency)}
-                      </p>
-                    </div>
+                    {/* The API omits baseSalary for a Team Lead viewing a team
+                        member; render nothing rather than a misleading PKR 0. */}
+                    {detailEmployee.baseSalary !== undefined && (
+                      <div>
+                        <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">Base Salary</p>
+                        <p className="text-xs text-brand-cyan font-bold mt-1 font-mono">
+                          {money(detailEmployee.baseSalary, detailEmployee.currency)}
+                        </p>
+                      </div>
+                    )}
                     <div>
                       <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">Shift Timings</p>
                       <p className="text-xs text-brand-text font-mono mt-1 font-bold">{detailEmployee.shiftStart} - {detailEmployee.shiftEnd}</p>
@@ -433,6 +466,14 @@ export default function Employees() {
                {/* Action Buttons */}
               {isAdmin && (
                 <div className="mt-8 border-t border-brand-border pt-4 space-y-3">
+                  <button
+                    onClick={() => handleResetPassword(detailEmployee)}
+                    disabled={resetting}
+                    className="w-full flex items-center justify-center gap-2 py-3 rounded-full bg-brand-blue/10 hover:bg-brand-blue hover:text-brand-bg border border-brand-blue/30 text-xs font-bold uppercase tracking-wider font-display transition-all duration-300 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {resetting ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+                    Reset Password (One-Time Credential)
+                  </button>
                   {detailEmployee.status === 'active' && (
                     <button
                       onClick={() => handleTerminate(detailEmployee.id)}
@@ -451,6 +492,55 @@ export default function Employees() {
                   </button>
                 </div>
               )}
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* ---------------- One-Time Password Modal ---------------- */}
+      <AnimatePresence>
+        {resetResult && (
+          <>
+            {/* No click-away dismiss: the password cannot be retrieved again, so
+                closing is an explicit acknowledgement. */}
+            <div className="fixed inset-0 bg-black/60 z-[60] backdrop-blur-sm" />
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-brand-bg-elevated border border-brand-border rounded-2xl p-6 shadow-glow z-[70]"
+            >
+              <h3 className="text-sm font-extrabold text-brand-text font-display uppercase mb-1">Password Reset Complete</h3>
+              <p className="text-xs text-brand-text-soft leading-relaxed mb-4">
+                Give this password to <span className="font-bold text-brand-text">{resetResult.fullName}</span>.
+                It is shown <span className="font-bold text-brand-amber">once</span> and cannot be retrieved again.
+                They must change it the first time they sign in.
+              </p>
+
+              <div className="p-3.5 rounded-xl border border-brand-border bg-brand-bg mb-3">
+                <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">Email</p>
+                <p className="text-xs text-brand-text font-mono mt-1 break-all">{resetResult.email}</p>
+              </div>
+              <div className="p-3.5 rounded-xl border border-brand-amber/30 bg-brand-amber/5 mb-5 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-[9px] text-brand-text-mute uppercase font-bold tracking-wider">One-Time Password</p>
+                  <p className="text-sm text-brand-text font-mono font-bold mt-1 break-all select-all">{resetResult.password}</p>
+                </div>
+                <button
+                  onClick={copyResetPassword}
+                  className="p-2 rounded-xl border border-brand-border text-brand-text-soft hover:text-brand-text hover:border-brand-blue-soft transition-colors cursor-pointer shrink-0"
+                  title="Copy password"
+                >
+                  <Copy className="w-4 h-4" />
+                </button>
+              </div>
+
+              <button
+                onClick={() => setResetResult(null)}
+                className="w-full py-2.5 rounded-full bg-gradient-to-r from-brand-blue via-brand-violet to-brand-cyan text-brand-bg font-bold font-display text-xs cursor-pointer hover:scale-[1.01] transition-all"
+              >
+                I have saved it — close
+              </button>
             </motion.div>
           </>
         )}

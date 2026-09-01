@@ -86,8 +86,14 @@ api.interceptors.response.use(
     const original = error.config;
     const status = error.response?.status;
 
-    // Never try to refresh the refresh call itself, or the login request.
-    const isAuthCall = original?.url?.includes('/auth/refresh') || original?.url?.includes('/auth/login');
+    // Never try to refresh the refresh call itself, or a sign-in attempt.
+    // '/auth/google-login' must be listed explicitly — it does not contain the
+    // substring '/auth/login', so the old check missed it and a rejected Google
+    // sign-in (401) was treated as an expired session: the interceptor tried a
+    // refresh with no token, failed, and reloaded to /login?reason=session-expired,
+    // replacing the real error message with a bogus "session expired" toast.
+    const NO_SESSION_ENDPOINTS = ['/auth/login', '/auth/google-login', '/auth/refresh'];
+    const isAuthCall = NO_SESSION_ENDPOINTS.some((p) => original?.url?.includes(p));
 
     if (status === 401 && original && !original._retry && !isAuthCall) {
       original._retry = true;

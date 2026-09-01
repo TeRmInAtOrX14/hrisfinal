@@ -20,6 +20,18 @@ function withTeams(employee) {
   };
 }
 
+/**
+ * Compensation data is admin/self only, like the salaryHistory include below. A
+ * Team Lead's directory view of their team still carried baseSalary and
+ * bankAccount on every row, so the restriction on the history was undone by the
+ * row itself.
+ */
+function redactCompensation(employee, viewer) {
+  if (isAdmin(viewer) || viewer.employee?.id === employee.id) return employee;
+  const { baseSalary, bankAccount, ...visible } = employee;
+  return visible;
+}
+
 // ---------------------------------------------------------------------------
 // Campaign metadata for filters and forms
 // ---------------------------------------------------------------------------
@@ -102,7 +114,7 @@ exports.getEmployees = async (req, res, next) => {
       orderBy: { employeeCode: 'asc' },
     });
 
-    res.json(employees.map(withTeams));
+    res.json(employees.map((e) => withTeams(redactCompensation(e, req.user))));
   } catch (err) {
     next(err);
   }
@@ -136,7 +148,7 @@ exports.getEmployeeById = async (req, res, next) => {
       return res.status(404).json({ error: 'Employee not found' });
     }
 
-    res.json(withTeams(employee));
+    res.json(withTeams(redactCompensation(employee, req.user)));
   } catch (err) {
     next(err);
   }
