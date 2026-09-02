@@ -28,9 +28,10 @@ router.post(
   controller.previewCommission
 );
 
+// Authorization is scoped inside the controller: admins log for anyone, Team
+// Leads for their own campaign's members, and SDRs/Employees for themselves.
 router.post(
   '/performance',
-  requireRole(ADMIN),
   validate(schemas.campaign.performance),
   controller.logPerformance
 );

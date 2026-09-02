@@ -9,6 +9,7 @@ import {
   DollarSign,
   UserCheck,
   Info,
+  Save,
 } from 'lucide-react';
 import {
   BarChart,
@@ -63,6 +64,11 @@ export default function TeamLeadDashboard() {
   const [pendingCount, setPendingCount] = useState(0);
   const [loading, setLoading] = useState(true);
 
+  // Inline performance entry for the team the lead runs.
+  const [campaignId, setCampaignId] = useState(null);
+  const [drafts, setDrafts] = useState({}); // { [employeeId]: { meetingsBooked, showups } }
+  const [savingId, setSavingId] = useState(null);
+
   const currentUser = session.user;
 
   useEffect(() => {
@@ -102,6 +108,7 @@ export default function TeamLeadDashboard() {
         );
 
         if (led) {
+          if (!cancelled) setCampaignId(led.id);
           const dash = await api.get(`/campaigns/${led.id}/dashboard?month=${month}&year=${year}`);
           if (!cancelled) setDashboard(dash.data);
         }
@@ -116,6 +123,73 @@ export default function TeamLeadDashboard() {
       cancelled = true;
     };
   }, [currentUser?.employee?.id]);
+
+  // Seed the editable roster from whatever is currently logged, so the lead
+  // edits live figures rather than starting blank.
+  useEffect(() => {
+    if (!dashboard) return;
+    const fresh = {};
+    for (const row of dashboard.leaderboard || []) {
+      fresh[row.employeeId] = {
+        meetingsBooked: row.meetingsBooked ?? 0,
+        showups: row.showups ?? 0,
+      };
+    }
+    // The lead's own row — not in the leaderboard (SDRs only), but the lead
+    // may log their own numbers too.
+    const leadId = dashboard.campaign?.teamLeadId;
+    if (leadId) {
+      fresh[leadId] = {
+        meetingsBooked: dashboard.campaign?.teamLeadPerformance?.meetingsBooked ?? 0,
+        showups: dashboard.campaign?.teamLeadPerformance?.showups ?? 0,
+      };
+    }
+    // Merge, don't replace: saving one row refetches the dashboard, and a
+    // wholesale reseed would discard unsaved edits typed into other rows.
+    setDrafts((prev) => {
+      const next = {};
+      for (const id of Object.keys(fresh)) next[id] = prev[id] ?? fresh[id];
+      return next;
+    });
+  }, [dashboard]);
+
+  const saveMemberPerformance = async (employeeId) => {
+    if (!campaignId) return;
+    const draft = drafts[employeeId] || {};
+    // Whole numbers only — the API rejects decimals for counts.
+    const toCount = (v) => Math.trunc(Number(v)) || 0;
+    const meetingsNum = toCount(draft.meetingsBooked);
+    const showupsNum = toCount(draft.showups);
+    if (showupsNum < 0 || meetingsNum < 0) {
+      toast.error('Metrics cannot be negative.');
+      return;
+    }
+    if (showupsNum > meetingsNum) {
+      toast.error('Show-ups cannot exceed meetings booked.');
+      return;
+    }
+    try {
+      setSavingId(employeeId);
+      const today = new Date();
+      const month = today.getMonth() + 1;
+      const year = today.getFullYear();
+      await api.post('/campaigns/performance', {
+        employeeId,
+        campaignId,
+        month,
+        year,
+        meetingsBooked: meetingsNum,
+        showups: showupsNum,
+      });
+      toast.success('Metrics saved.');
+      const dash = await api.get(`/campaigns/${campaignId}/dashboard?month=${month}&year=${year}`);
+      setDashboard(dash.data);
+    } catch (err) {
+      toast.error(apiError(err, 'Could not save metrics.'));
+    } finally {
+      setSavingId(null);
+    }
+  };
 
   if (loading) {
     return (
@@ -418,9 +492,14 @@ export default function TeamLeadDashboard() {
       </div>
 
       <div className="p-6 rounded-2xl glass-panel border border-brand-border/40 space-y-4">
-        <h3 className="text-xs font-bold text-brand-text uppercase tracking-wider font-display">
-          Team roster
-        </h3>
+        <div>
+          <h3 className="text-xs font-bold text-brand-text uppercase tracking-wider font-display">
+            Team roster &amp; performance entry
+          </h3>
+          <p className="text-[10px] text-brand-text-mute mt-1">
+            Edit each member's booked meetings and show-ups for {new Date().toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })} and press save. These figures drive commission on the next payroll run.
+          </p>
+        </div>
 
         <div className="overflow-x-auto">
           <table className="w-full text-xs text-left">
@@ -432,6 +511,7 @@ export default function TeamLeadDashboard() {
                 <th scope="col" className="py-3 px-4 text-center">Show-ups</th>
                 <th scope="col" className="py-3 px-4 text-center">No-shows</th>
                 <th scope="col" className="py-3 px-4 text-right">Commission</th>
+                <th scope="col" className="py-3 px-4 text-right">Save</th>
               </tr>
             </thead>
             <tbody>
@@ -463,11 +543,35 @@ export default function TeamLeadDashboard() {
                         {badge[0]}
                       </span>
                     </td>
-                    <td className="py-3 px-4 text-center font-mono text-brand-text tabular-nums">
-                      {sdr.meetingsBooked}
+                    <td className="py-3 px-4 text-center">
+                      <input
+                        type="number"
+                        min="0"
+                        aria-label={`Meetings booked for ${sdr.fullName}`}
+                        value={drafts[sdr.employeeId]?.meetingsBooked ?? ''}
+                        onChange={(e) =>
+                          setDrafts((d) => ({
+                            ...d,
+                            [sdr.employeeId]: { ...d[sdr.employeeId], meetingsBooked: e.target.value },
+                          }))
+                        }
+                        className="w-16 px-2 py-1 rounded-lg bg-brand-bg border border-brand-border text-xs text-brand-text text-center focus:outline-none focus:border-brand-blue tabular-nums"
+                      />
                     </td>
-                    <td className="py-3 px-4 text-center font-mono font-bold text-brand-green tabular-nums">
-                      {sdr.showups}
+                    <td className="py-3 px-4 text-center">
+                      <input
+                        type="number"
+                        min="0"
+                        aria-label={`Show-ups for ${sdr.fullName}`}
+                        value={drafts[sdr.employeeId]?.showups ?? ''}
+                        onChange={(e) =>
+                          setDrafts((d) => ({
+                            ...d,
+                            [sdr.employeeId]: { ...d[sdr.employeeId], showups: e.target.value },
+                          }))
+                        }
+                        className="w-16 px-2 py-1 rounded-lg bg-brand-bg border border-brand-border text-xs text-brand-green font-bold text-center focus:outline-none focus:border-brand-blue tabular-nums"
+                      />
                     </td>
                     <td className="py-3 px-4 text-center font-mono text-brand-amber tabular-nums">
                       {sdr.noShows}
@@ -475,13 +579,83 @@ export default function TeamLeadDashboard() {
                     <td className="py-3 px-4 text-right font-mono font-bold text-brand-text tabular-nums">
                       {money(sdr.commissionEarned)}
                     </td>
+                    <td className="py-3 px-4 text-right">
+                      <button
+                        onClick={() => saveMemberPerformance(sdr.employeeId)}
+                        disabled={savingId === sdr.employeeId}
+                        title="Save metrics"
+                        aria-label={`Save metrics for ${sdr.fullName}`}
+                        className="p-1.5 rounded-lg border border-brand-border text-brand-text-soft hover:text-brand-text hover:border-brand-blue/40 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Save className="w-3.5 h-3.5" />
+                      </button>
+                    </td>
                   </tr>
                 );
               })}
 
+              {/* The lead's own metrics. Kept out of the leaderboard and the team
+                  totals — it informs, it does not feed the ladder payout. */}
+              {campaign.teamLeadId && (
+                <tr className="border-t-2 border-brand-border/60 bg-brand-bg-elevated/20">
+                  <td className="py-3 px-4 font-bold text-brand-text">
+                    You
+                    <span className="text-[8px] text-brand-text-mute uppercase tracking-widest ml-1.5">Team Lead</span>
+                  </td>
+                  <td className="py-3 px-4">
+                    <span className="text-[8px] text-brand-text-mute uppercase tracking-widest">Own metrics</span>
+                  </td>
+                  <td className="py-3 px-4 text-center">
+                    <input
+                      type="number"
+                      min="0"
+                      aria-label="Your meetings booked"
+                      value={drafts[campaign.teamLeadId]?.meetingsBooked ?? ''}
+                      onChange={(e) =>
+                        setDrafts((d) => ({
+                          ...d,
+                          [campaign.teamLeadId]: { ...d[campaign.teamLeadId], meetingsBooked: e.target.value },
+                        }))
+                      }
+                      className="w-16 px-2 py-1 rounded-lg bg-brand-bg border border-brand-border text-xs text-brand-text text-center focus:outline-none focus:border-brand-blue tabular-nums"
+                    />
+                  </td>
+                  <td className="py-3 px-4 text-center">
+                    <input
+                      type="number"
+                      min="0"
+                      aria-label="Your show-ups"
+                      value={drafts[campaign.teamLeadId]?.showups ?? ''}
+                      onChange={(e) =>
+                        setDrafts((d) => ({
+                          ...d,
+                          [campaign.teamLeadId]: { ...d[campaign.teamLeadId], showups: e.target.value },
+                        }))
+                      }
+                      className="w-16 px-2 py-1 rounded-lg bg-brand-bg border border-brand-border text-xs text-brand-green font-bold text-center focus:outline-none focus:border-brand-blue tabular-nums"
+                    />
+                  </td>
+                  <td className="py-3 px-4 text-center font-mono text-brand-text-mute">—</td>
+                  <td className="py-3 px-4 text-right font-mono font-bold text-brand-text tabular-nums">
+                    {money(stats.teamLeadCommission)}
+                  </td>
+                  <td className="py-3 px-4 text-right">
+                    <button
+                      onClick={() => saveMemberPerformance(campaign.teamLeadId)}
+                      disabled={savingId === campaign.teamLeadId}
+                      title="Save your metrics"
+                      aria-label="Save your metrics"
+                      className="p-1.5 rounded-lg border border-brand-border text-brand-text-soft hover:text-brand-text hover:border-brand-blue/40 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                    </button>
+                  </td>
+                </tr>
+              )}
+
               {leaderboard.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-brand-text-mute italic">
+                  <td colSpan={7} className="py-8 text-center text-brand-text-mute italic">
                     No SDRs assigned to your campaign yet.
                   </td>
                 </tr>

@@ -256,7 +256,10 @@ const campaign = {
     status: z.enum(['draft', 'active', 'archived']).optional(),
     startDate: isoDate.optional().nullable(),
     endDate: isoDate.optional().nullable(),
-    slabs: z.array(slab).default([]),
+    // Optional and NOT defaulted: the controller must be able to tell "slabs
+    // omitted, leave them alone" from "slabs explicitly []". A default of [] let
+    // a rename silently wipe a live structure's bands.
+    slabs: z.array(slab).optional(),
   }),
 
   previewCommission: z.object({
@@ -280,6 +283,15 @@ const campaign = {
 // Payroll
 // ---------------------------------------------------------------------------
 
+// A payroll-run performance field. A blank ('') or null value means "not
+// supplied" and is normalised to undefined, so the run leaves the logged
+// CampaignPerformance value in place instead of overriding it. Only a real
+// number (including a deliberate 0) counts as an override. Without this, the
+// client's default-0 for every employee silently paid commission on zero
+// show-ups regardless of what was logged.
+const runMetric = z.preprocess((v) => (v === '' || v === null ? undefined : v), count.optional());
+const runMoney = z.preprocess((v) => (v === '' || v === null ? undefined : v), money.optional());
+
 const payroll = {
   run: z.object({
     month,
@@ -288,12 +300,12 @@ const payroll = {
       .array(
         z.object({
           employeeId: uuid,
-          showups: count.optional(),
-          meetingsScheduled: count.optional(),
-          noShows: count.optional(),
-          bonus: money.optional(),
+          showups: runMetric,
+          meetingsScheduled: runMetric,
+          noShows: runMetric,
+          bonus: runMoney,
           bonusNotes: optionalText(300),
-          otherDeductions: money.optional(),
+          otherDeductions: runMoney,
           deductionNotes: optionalText(300),
         })
       )

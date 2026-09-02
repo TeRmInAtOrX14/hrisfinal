@@ -67,6 +67,11 @@ export default function SDRDashboard() {
   const [requestCounts, setRequestCounts] = useState({ leave: 0, halfday: 0, wfh: 0 });
   const [loading, setLoading] = useState(true);
 
+  // Self-service performance entry (meetings scheduled + show-ups). These feed
+  // the commission calculation on the next payroll run.
+  const [perfDraft, setPerfDraft] = useState({ meetingsScheduled: '', showups: '' });
+  const [savingPerf, setSavingPerf] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -132,6 +137,59 @@ export default function SDRDashboard() {
       cancelled = true;
     };
   }, []);
+
+  // Seed the entry form from whatever is already logged this month, so the SDR
+  // edits the current figures rather than starting from blank.
+  useEffect(() => {
+    if (!campaignDashboard || !employee) return;
+    const mine = (campaignDashboard.leaderboard || []).find((s) => s.employeeId === employee.id);
+    setPerfDraft({
+      meetingsScheduled: mine?.meetingsBooked ?? '',
+      showups: mine?.showups ?? '',
+    });
+  }, [campaignDashboard, employee]);
+
+  const saveMyPerformance = async (e) => {
+    e.preventDefault();
+    const campaignId = employee?.campaignMembers?.find((m) => m.status === 'active')?.campaignId;
+    if (!campaignId) {
+      toast.error('You are not assigned to an active campaign.');
+      return;
+    }
+    // Whole numbers only — the API rejects decimals for counts.
+    const toCount = (v) => Math.trunc(Number(v)) || 0;
+    const showupsNum = toCount(perfDraft.showups);
+    const meetingsNum = toCount(perfDraft.meetingsScheduled);
+    if (showupsNum < 0 || meetingsNum < 0) {
+      toast.error('Metrics cannot be negative.');
+      return;
+    }
+    if (showupsNum > meetingsNum) {
+      toast.error('Show-ups cannot exceed meetings scheduled.');
+      return;
+    }
+    try {
+      setSavingPerf(true);
+      const today = new Date();
+      const month = today.getMonth() + 1;
+      const year = today.getFullYear();
+      await api.post('/campaigns/performance', {
+        employeeId: employee.id,
+        campaignId,
+        month,
+        year,
+        meetingsBooked: meetingsNum,
+        showups: showupsNum,
+      });
+      toast.success('Metrics saved. Your commission updates on the next payroll run.');
+      const dash = await api.get(`/campaigns/${campaignId}/dashboard?month=${month}&year=${year}`);
+      setCampaignDashboard(dash.data);
+    } catch (err) {
+      toast.error(apiError(err, 'Could not save your metrics.'));
+    } finally {
+      setSavingPerf(false);
+    }
+  };
 
   const downloadPayslip = async (payslip) => {
     try {
@@ -306,6 +364,53 @@ export default function SDRDashboard() {
             />
           </div>
         </div>
+      )}
+
+      {/* Self-service metric entry — feeds commission on the next payroll run. */}
+      {activeMember && (
+        <form
+          onSubmit={saveMyPerformance}
+          className="p-6 rounded-2xl glass-panel border border-brand-border/40 space-y-4"
+        >
+          <div>
+            <h3 className="text-xs font-bold text-brand-text uppercase tracking-wider font-display flex items-center gap-1.5">
+              <TrendingUp className="w-3.5 h-3.5 text-brand-cyan" />
+              Log my metrics — {monthName(new Date().getMonth() + 1)} {new Date().getFullYear()}
+            </h3>
+            <p className="text-[10px] text-brand-text-mute mt-1">
+              Enter this month's totals for {campaignName}. Saving updates the figures your commission is calculated from.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+            <div>
+              <label className="block text-[9px] text-brand-text-mute uppercase font-bold tracking-wider mb-1">Meetings Scheduled</label>
+              <input
+                type="number"
+                min="0"
+                value={perfDraft.meetingsScheduled}
+                onChange={(e) => setPerfDraft((d) => ({ ...d, meetingsScheduled: e.target.value }))}
+                className="w-full px-3 py-2 rounded-lg bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue tabular-nums"
+              />
+            </div>
+            <div>
+              <label className="block text-[9px] text-brand-text-mute uppercase font-bold tracking-wider mb-1">Show-ups</label>
+              <input
+                type="number"
+                min="0"
+                value={perfDraft.showups}
+                onChange={(e) => setPerfDraft((d) => ({ ...d, showups: e.target.value }))}
+                className="w-full px-3 py-2 rounded-lg bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue tabular-nums"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={savingPerf}
+              className="py-2 px-4 rounded-xl brandigade-gradient text-white font-bold font-display text-xs uppercase tracking-wider shadow-lg hover:scale-[1.02] active:scale-95 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {savingPerf ? 'Saving…' : 'Save Metrics'}
+            </button>
+          </div>
+        </form>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

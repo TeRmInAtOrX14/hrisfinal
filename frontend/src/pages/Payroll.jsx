@@ -86,16 +86,20 @@ export default function Payroll() {
         
         const empRes = await api.get('/employees');
 
-        // Prep the performance array default values
+        // Prep the performance array. Fields start BLANK, not 0: a blank field
+        // means "use the show-ups/meetings already logged for this month" — the
+        // run only overrides a metric the admin actually types in. Seeding 0s
+        // here used to override the logged CampaignPerformance with zero, paying
+        // commission on no show-ups.
         const perfDefaults = empRes.data.map(emp => ({
           employeeId: emp.id,
           fullName: emp.fullName,
-          showups: 0,
-          meetingsScheduled: 0,
-          noShows: 0,
-          bonus: 0,
+          showups: '',
+          meetingsScheduled: '',
+          noShows: '',
+          bonus: '',
           bonusNotes: '',
-          otherDeductions: 0,
+          otherDeductions: '',
           deductionNotes: ''
         }));
         replace(perfDefaults);
@@ -120,17 +124,32 @@ export default function Payroll() {
   const handleRunPayroll = async (data) => {
     try {
       toast.loading('Computing payroll parameters...', { id: 'payroll-run' });
+      // Send blank fields as null (not 0) so the backend keeps the logged
+      // performance figure instead of overriding it with zero. Only a value the
+      // admin actually typed becomes an override.
+      const numOrNull = (v) => {
+        if (v === '' || v === null || v === undefined) return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      // Counts are whole numbers on the API; truncate so "5.5" typed into a
+      // show-ups box becomes 5 instead of a validation error. Negatives are
+      // left alone so the API's clear "must be >= 0" error surfaces.
+      const intOrNull = (v) => {
+        const n = numOrNull(v);
+        return n === null ? null : Math.trunc(n);
+      };
       const res = await api.post('/payroll/run', {
         month: parseInt(data.month),
         year: parseInt(data.year),
         performance: data.performance.map(p => ({
           employeeId: p.employeeId,
-          showups: parseInt(p.showups) || 0,
-          meetingsScheduled: parseInt(p.meetingsScheduled) || 0,
-          noShows: parseInt(p.noShows) || 0,
-          bonus: parseFloat(p.bonus) || 0,
+          showups: intOrNull(p.showups),
+          meetingsScheduled: intOrNull(p.meetingsScheduled),
+          noShows: intOrNull(p.noShows),
+          bonus: numOrNull(p.bonus),
           bonusNotes: p.bonusNotes,
-          otherDeductions: parseFloat(p.otherDeductions) || 0,
+          otherDeductions: numOrNull(p.otherDeductions),
           deductionNotes: p.deductionNotes
         }))
       });
@@ -413,6 +432,10 @@ export default function Payroll() {
               {/* Performance fields */}
               <div className="space-y-4">
                 <h4 className="text-xs font-bold text-brand-text uppercase tracking-widest font-display">Input SDR Campaign Metrics</h4>
+                <p className="text-[10px] text-brand-text-mute leading-relaxed -mt-1">
+                  Leave a field <b>blank</b> to use the show-ups &amp; meetings already logged for this month
+                  (by the SDR or their Team Lead). Enter a number only to override the logged figure.
+                </p>
                 <div className="space-y-3.5 max-h-80 overflow-y-auto pr-2">
                   {fields.map((field, index) => (
                     <div key={field.id} className="p-4 rounded-xl border border-brand-border bg-brand-bg/40 space-y-4">
@@ -423,15 +446,15 @@ export default function Payroll() {
                       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
                         <div>
                           <label className="block text-[9px] text-brand-text-mute uppercase font-bold tracking-wider mb-1">Showups</label>
-                          <input type="number" {...register(`performance.${index}.showups`)} className="w-full px-2.5 py-1.5 rounded-lg bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue" />
+                          <input type="number" min="0" placeholder="logged" {...register(`performance.${index}.showups`)} className="w-full px-2.5 py-1.5 rounded-lg bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue placeholder:text-brand-text-mute/50" />
                         </div>
                         <div>
                           <label className="block text-[9px] text-brand-text-mute uppercase font-bold tracking-wider mb-1">Scheduled</label>
-                          <input type="number" {...register(`performance.${index}.meetingsScheduled`)} className="w-full px-2.5 py-1.5 rounded-lg bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue" />
+                          <input type="number" min="0" placeholder="logged" {...register(`performance.${index}.meetingsScheduled`)} className="w-full px-2.5 py-1.5 rounded-lg bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue placeholder:text-brand-text-mute/50" />
                         </div>
                         <div>
                           <label className="block text-[9px] text-brand-text-mute uppercase font-bold tracking-wider mb-1">No-Shows</label>
-                          <input type="number" {...register(`performance.${index}.noShows`)} className="w-full px-2.5 py-1.5 rounded-lg bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue" />
+                          <input type="number" min="0" placeholder="logged" {...register(`performance.${index}.noShows`)} className="w-full px-2.5 py-1.5 rounded-lg bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none focus:border-brand-blue placeholder:text-brand-text-mute/50" />
                         </div>
                         <div>
                           <label className="block text-[9px] text-brand-text-mute uppercase font-bold tracking-wider mb-1">Bonus Amount</label>

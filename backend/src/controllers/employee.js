@@ -401,6 +401,28 @@ exports.deleteEmployee = async (req, res, next) => {
       return res.status(400).json({ error: 'You cannot delete your own account.' });
     }
 
+    // Never hard-delete an employee who carries financial or attendance history.
+    // Deleting them would destroy issued payslips, worked-day records and salary
+    // history — the very records runPayroll refuses to touch once issued — and
+    // would erase spiffs this person awarded to OTHER employees. Terminating
+    // disables the login and preserves everything. Permanent delete stays
+    // available only for accounts created by mistake with no history yet.
+    const [payslipCount, attendanceCount, givenSpiffCount] = await Promise.all([
+      prisma.payslip.count({ where: { employeeId: id } }),
+      prisma.attendance.count({ where: { employeeId: id } }),
+      prisma.spiff.count({ where: { givenById: employee.userId } }),
+    ]);
+
+    if (payslipCount > 0 || attendanceCount > 0 || givenSpiffCount > 0) {
+      return res.status(409).json({
+        error:
+          'This employee has payroll or attendance history and cannot be permanently deleted. ' +
+          'Use Terminate instead — it disables their login and keeps the records intact. ' +
+          'Permanent delete is only for accounts created by mistake with no history.',
+        code: 'EMPLOYEE_HAS_HISTORY',
+      });
+    }
+
     await prisma.$transaction([
       // Detach rather than delete: keep the audit trail, drop the FK.
       prisma.auditLog.updateMany({ where: { userId: employee.userId }, data: { userId: null } }),

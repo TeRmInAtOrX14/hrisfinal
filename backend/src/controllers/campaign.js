@@ -1,6 +1,6 @@
 const prisma = require('../lib/prisma');
 const { logAudit } = require('../utils/audit');
-const { isAdmin, visibleCampaignIds } = require('../utils/scope');
+const { isAdmin, isTeamLead, ledCampaignIds, visibleCampaignIds } = require('../utils/scope');
 const {
   calculateSlabCommission,
   describeSlabCommission,
@@ -347,6 +347,7 @@ exports.toggleMemberStatus = async (req, res, next) => {
  * other ends, treating a null max as infinity.
  */
 function validateSlabs(slabs) {
+  if (!Array.isArray(slabs)) return null;
   for (let i = 0; i < slabs.length; i++) {
     const a = slabs[i];
     const aMax = a.maxShowups ?? Infinity;
@@ -399,13 +400,14 @@ exports.createStructure = async (req, res, next) => {
   try {
     const { campaignId } = req.params;
     const { name, startDate, endDate, slabs } = req.body;
+    const slabList = slabs ?? [];
 
     const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
     if (!campaign) {
       return res.status(404).json({ error: 'Campaign not found' });
     }
 
-    const validationError = validateSlabs(slabs);
+    const validationError = validateSlabs(slabList);
     if (validationError) {
       return res.status(400).json({ error: validationError });
     }
@@ -417,7 +419,7 @@ exports.createStructure = async (req, res, next) => {
         status: 'draft',
         startDate: startDate ? new Date(startDate) : null,
         endDate: endDate ? new Date(endDate) : null,
-        slabs: { create: slabs },
+        slabs: { create: slabList },
       },
       include: { slabs: { orderBy: { minShowups: 'asc' } } },
     });
@@ -443,19 +445,45 @@ exports.updateStructure = async (req, res, next) => {
       return res.status(404).json({ error: 'Commission structure not found' });
     }
 
-    const validationError = validateSlabs(slabs);
-    if (validationError) {
-      return res.status(400).json({ error: validationError });
+    // Only touch the slab table when the caller actually sent `slabs`. Omitting
+    // the key now leaves the existing bands intact. Previously `slabs` defaulted
+    // to [] in the schema, so a metadata-only edit (e.g. a rename) silently
+    // deleted every slab and recreated none — the next payroll run then paid
+    // zero commission for the whole campaign, unrecoverably.
+    const replacingSlabs = slabs !== undefined;
+
+    if (replacingSlabs) {
+      const validationError = validateSlabs(slabs);
+      if (validationError) {
+        return res.status(400).json({ error: validationError });
+      }
+    }
+
+    // An active structure must never be left with zero slabs, or payroll pays
+    // no commission for the campaign. Mirrors the guard in activateStructure.
+    const willBeActive = (status ?? existing.status) === 'active';
+    if (willBeActive) {
+      const slabCount = replacingSlabs
+        ? slabs.length
+        : await prisma.commissionSlab.count({ where: { structureId: id } });
+      if (slabCount === 0) {
+        return res
+          .status(400)
+          .json({ error: 'An active commission structure must have at least one slab.' });
+      }
     }
 
     const updated = await prisma.$transaction(async (tx) => {
-      await tx.commissionSlab.deleteMany({ where: { structureId: id } });
-
-      const data = { slabs: { create: slabs } };
+      const data = {};
       if (name !== undefined) data.name = name;
       if (status !== undefined) data.status = status;
       if (startDate !== undefined) data.startDate = startDate ? new Date(startDate) : null;
       if (endDate !== undefined) data.endDate = endDate ? new Date(endDate) : null;
+
+      if (replacingSlabs) {
+        await tx.commissionSlab.deleteMany({ where: { structureId: id } });
+        data.slabs = { create: slabs };
+      }
 
       return tx.commissionStructure.update({
         where: { id },
@@ -465,7 +493,7 @@ exports.updateStructure = async (req, res, next) => {
     });
 
     await logAudit(req.user.id, 'UPDATE_COMMISSION_STRUCTURE', 'CommissionStructure', id, {
-      slabCount: slabs.length,
+      slabCount: replacingSlabs ? slabs.length : 'unchanged',
     });
     res.json(updated);
   } catch (err) {
@@ -665,6 +693,15 @@ exports.getCampaignDashboard = async (req, res, next) => {
         status: campaign.status,
         teamLead: teamLeadMember?.employee.fullName || 'No Lead Assigned',
         teamLeadId: teamLeadMember?.employee.id || null,
+        // The lead's own logged row, so the Team Lead dashboard can seed a
+        // self-entry form. Deliberately NOT part of `leaderboard`/`stats`, which
+        // sum SDR rows only — this never feeds the lead's ladder payout.
+        teamLeadPerformance: teamLeadMember
+          ? {
+              meetingsBooked: perfByEmployee.get(teamLeadMember.employee.id)?.meetingsBooked || 0,
+              showups: perfByEmployee.get(teamLeadMember.employee.id)?.showups || 0,
+            }
+          : null,
         totalSdrs: sdrs.length,
         monthlyShowupTarget: campaign.monthlyShowupTarget,
         // The SDR dashboard reads its slab table from here; it used to look for
@@ -709,14 +746,42 @@ exports.logPerformance = async (req, res, next) => {
   try {
     const { employeeId, campaignId, month, year, ...metrics } = req.body;
 
+    // Authorization by role:
+    //   - Admin/CEO/COO : any employee, any campaign.
+    //   - Team Lead     : any member (themselves included) of a campaign they
+    //                     actively lead.
+    //   - SDR/Employee  : their own record only (self-service entry).
+    // Everyone is additionally constrained to an active membership below.
+    if (!isAdmin(req.user)) {
+      if (!req.user.employee) {
+        return res.status(400).json({ error: 'No employee profile is linked to your account.' });
+      }
+      const selfId = req.user.employee.id;
+
+      if (isTeamLead(req.user)) {
+        const ledIds = await ledCampaignIds(selfId);
+        if (!ledIds.includes(campaignId)) {
+          return res
+            .status(403)
+            .json({ error: 'You can only log performance for a campaign you lead.' });
+        }
+      } else if (employeeId !== selfId) {
+        return res
+          .status(403)
+          .json({ error: 'You can only log your own performance metrics.' });
+      }
+    }
+
     const member = await prisma.campaignMember.findUnique({
       where: { campaignId_employeeId: { campaignId, employeeId } },
     });
 
-    if (!member) {
+    // Require an ACTIVE membership: an inactive/removed member should not accept
+    // new numbers that would then feed a commission calculation.
+    if (!member || member.status !== 'active') {
       return res
         .status(400)
-        .json({ error: 'That employee is not a member of this campaign.' });
+        .json({ error: 'That employee is not an active member of this campaign.' });
     }
 
     const performance = await prisma.campaignPerformance.upsert({

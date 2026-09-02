@@ -203,6 +203,10 @@ exports.runPayroll = async (req, res, next) => {
       const override = payloadPerf.get(emp.id);
       const stored = perfByEmployee.get(emp.id);
 
+      // Logged CampaignPerformance is the source of truth. A run-modal field is
+      // an override only when the admin actually entered a value: the schema
+      // normalises blank/null inputs to undefined (see runMetric), so `??`
+      // correctly falls through to the stored figure instead of a default 0.
       const showups = override?.showups ?? stored?.showups ?? 0;
       const meetingsScheduled = override?.meetingsScheduled ?? stored?.meetingsBooked ?? 0;
       const noShows = override?.noShows ?? stored?.noShows ?? 0;
@@ -292,6 +296,21 @@ exports.runPayroll = async (req, res, next) => {
 
     // ---- Persist as one atomic draft ---------------------------------------
     const payrollRun = await prisma.$transaction(async (tx) => {
+      // Re-check finalization INSIDE the transaction. The guard at the top of
+      // this handler runs before the whole compute phase; a second admin could
+      // finalize the period in that window (issuing PDFs and notifying staff).
+      // Without this re-read the upsert below would force the run back to
+      // 'draft' and delete those issued payslips — reverting a finalized run.
+      const current = await tx.payrollRun.findUnique({
+        where: { periodMonth_periodYear: { periodMonth: month, periodYear: year } },
+        select: { status: true },
+      });
+      if (current?.status === 'finalized') {
+        const err = new Error('Payroll period was finalized during this run.');
+        err.code = 'PAYROLL_ALREADY_FINALIZED';
+        throw err;
+      }
+
       const run = await tx.payrollRun.upsert({
         where: { periodMonth_periodYear: { periodMonth: month, periodYear: year } },
         create: {
@@ -327,6 +346,14 @@ exports.runPayroll = async (req, res, next) => {
 
     res.json({ payrollRun, payslipsCount: payslips.length, payslips });
   } catch (err) {
+    if (err.code === 'PAYROLL_ALREADY_FINALIZED') {
+      return res.status(409).json({
+        error:
+          'This payroll period was finalized while the run was being calculated. ' +
+          'Issued payslips are a financial record and were left untouched.',
+        code: 'PAYROLL_ALREADY_FINALIZED',
+      });
+    }
     next(err);
   }
 };

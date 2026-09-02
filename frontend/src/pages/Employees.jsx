@@ -210,7 +210,7 @@ export default function Employees() {
   };
 
   const handleDeleteEmployee = async (id) => {
-    if (confirm('WARNING: Are you absolutely sure you want to delete this employee? This will permanently delete their profile, user credentials, attendance history, payslips, leaves, loans, and EVERYTHING else. This action CANNOT be undone.')) {
+    if (confirm('Permanently delete this employee?\n\nThis only works for accounts created by mistake with no history. An employee who has payroll or attendance records cannot be deleted — use "Terminate Employment" instead, which disables their login and keeps the records.\n\nThis action CANNOT be undone.')) {
       try {
         await api.delete(`/employees/${id}`);
         toast.success('Employee and all records deleted permanently');
