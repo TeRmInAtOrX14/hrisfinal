@@ -12,10 +12,12 @@ import {
   Award,
   Zap,
   Info,
-  ShieldAlert
+  ShieldAlert,
+  Save
 } from 'lucide-react';
 import api, { session, apiError } from '../utils/api';
 import toast from 'react-hot-toast';
+import { MONTH_NAMES, payrollYears } from '../utils/format';
 
 export default function Campaigns() {
   const [campaigns, setCampaigns] = useState([]);
@@ -28,6 +30,14 @@ export default function Campaigns() {
   const [selectedCampaignId, setSelectedCampaignId] = useState('');
   const [dashboardData, setDashboardData] = useState(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
+
+  // Admin performance entry on the dashboard tab. Admins may log for any
+  // member of any campaign, for any month (e.g. last month's numbers before
+  // running that payroll).
+  const [perfMonth, setPerfMonth] = useState(new Date().getMonth() + 1);
+  const [perfYear, setPerfYear] = useState(new Date().getFullYear());
+  const [perfDrafts, setPerfDrafts] = useState({}); // { [employeeId]: { meetingsBooked, showups, noShows, cancelledMeetings } }
+  const [perfSavingId, setPerfSavingId] = useState(null);
 
   // Commission Builder state
   const [structures, setStructures] = useState([]);
@@ -93,18 +103,51 @@ export default function Campaigns() {
   // Fetch performance dashboard data when selected campaign or active tab changes
   useEffect(() => {
     if (selectedCampaignId && activeTab === 'dashboard') {
+      // A different campaign or period: drop any typed-but-unsaved drafts so
+      // the editor reseeds from that period's logged figures.
+      setPerfDrafts({});
       fetchDashboard();
     }
     if (selectedCampaignId && activeTab === 'commission_builder') {
       fetchStructures();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCampaignId, activeTab]);
+  }, [selectedCampaignId, activeTab, perfMonth, perfYear]);
+
+  // Seed the performance editor from what is logged. Merge rather than
+  // replace: saving one row refetches the dashboard, and a wholesale reseed
+  // would discard unsaved edits typed into other rows.
+  useEffect(() => {
+    if (!dashboardData) return;
+    const fresh = {};
+    for (const row of dashboardData.leaderboard || []) {
+      fresh[row.employeeId] = {
+        meetingsBooked: row.meetingsBooked ?? 0,
+        showups: row.showups ?? 0,
+        noShows: row.noShows ?? 0,
+        cancelledMeetings: row.cancelledMeetings ?? 0,
+      };
+    }
+    const leadId = dashboardData.campaign?.teamLeadId;
+    if (leadId) {
+      fresh[leadId] = {
+        meetingsBooked: dashboardData.campaign?.teamLeadPerformance?.meetingsBooked ?? 0,
+        showups: dashboardData.campaign?.teamLeadPerformance?.showups ?? 0,
+        noShows: 0,
+        cancelledMeetings: 0,
+      };
+    }
+    setPerfDrafts((prev) => {
+      const next = {};
+      for (const id of Object.keys(fresh)) next[id] = prev[id] ?? fresh[id];
+      return next;
+    });
+  }, [dashboardData]);
 
   const fetchDashboard = async () => {
     try {
       setDashboardLoading(true);
-      const res = await api.get(`/campaigns/${selectedCampaignId}/dashboard`);
+      const res = await api.get(`/campaigns/${selectedCampaignId}/dashboard?month=${perfMonth}&year=${perfYear}`);
       setDashboardData(res.data);
     } catch (err) {
       toast.error(apiError(err, 'Failed to load campaign performance.'));
@@ -112,6 +155,59 @@ export default function Campaigns() {
       setDashboardLoading(false);
     }
   };
+
+  const saveAdminPerformance = async (employeeId) => {
+    if (!selectedCampaignId) return;
+    const draft = perfDrafts[employeeId] || {};
+    // Whole numbers only — the API rejects decimals for counts.
+    const toCount = (v) => Math.trunc(Number(v)) || 0;
+    const meetingsBooked = toCount(draft.meetingsBooked);
+    const showups = toCount(draft.showups);
+    const noShows = toCount(draft.noShows);
+    const cancelledMeetings = toCount(draft.cancelledMeetings);
+    if ([meetingsBooked, showups, noShows, cancelledMeetings].some((n) => n < 0)) {
+      toast.error('Metrics cannot be negative.');
+      return;
+    }
+    if (showups > meetingsBooked) {
+      toast.error('Show-ups cannot exceed meetings booked.');
+      return;
+    }
+    const isLead = employeeId === dashboardData?.campaign?.teamLeadId;
+    try {
+      setPerfSavingId(employeeId);
+      await api.post('/campaigns/performance', {
+        employeeId,
+        campaignId: selectedCampaignId,
+        month: perfMonth,
+        year: perfYear,
+        meetingsBooked,
+        showups,
+        // The lead row only exposes the two headline figures; leave their
+        // stored no-show / cancelled counts untouched rather than zeroing them.
+        ...(isLead ? {} : { noShows, cancelledMeetings }),
+      });
+      toast.success('Performance saved.');
+      await fetchDashboard();
+    } catch (err) {
+      toast.error(apiError(err, 'Could not save performance.'));
+    } finally {
+      setPerfSavingId(null);
+    }
+  };
+
+  const perfInput = (employeeId, field, label, cls = '') => (
+    <input
+      type="number"
+      min="0"
+      aria-label={label}
+      value={perfDrafts[employeeId]?.[field] ?? ''}
+      onChange={(e) =>
+        setPerfDrafts((d) => ({ ...d, [employeeId]: { ...d[employeeId], [field]: e.target.value } }))
+      }
+      className={`w-16 px-2 py-1 rounded-lg bg-brand-bg border border-brand-border text-xs text-center focus:outline-none focus:border-brand-blue tabular-nums ${cls}`}
+    />
+  );
 
   const fetchStructures = async () => {
     try {
@@ -579,6 +675,31 @@ export default function Campaigns() {
                   </select>
                 </div>
 
+                {/* Period for the performance editor below. */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-brand-text-soft font-bold uppercase tracking-wider">Period:</span>
+                  <select
+                    value={perfMonth}
+                    onChange={(e) => setPerfMonth(Number(e.target.value))}
+                    aria-label="Performance month"
+                    className="px-3 py-2 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer font-bold"
+                  >
+                    {MONTH_NAMES.map((m, idx) => (
+                      <option key={m} value={idx + 1}>{m}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={perfYear}
+                    onChange={(e) => setPerfYear(Number(e.target.value))}
+                    aria-label="Performance year"
+                    className="px-3 py-2 rounded-xl bg-brand-bg border border-brand-border text-xs text-brand-text focus:outline-none cursor-pointer font-bold"
+                  >
+                    {payrollYears().map((y) => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
+                  </select>
+                </div>
+
                 {isAdmin && (
                   <div className="flex gap-2">
                     <button
@@ -641,6 +762,11 @@ export default function Campaigns() {
                       </h3>
                       <span className="text-[10px] text-brand-text-soft font-bold uppercase">Active Lead: {dashboardData.campaign.teamLead}</span>
                     </div>
+                    {isAdmin && (
+                      <p className="text-[10px] text-brand-text-mute -mt-2">
+                        Edit any member's figures for {MONTH_NAMES[perfMonth - 1]} {perfYear} and press save. Logged figures drive commission on that month's payroll run.
+                      </p>
+                    )}
 
                     <div className="overflow-x-auto">
                       <table className="w-full text-left text-xs border-collapse">
@@ -664,24 +790,74 @@ export default function Campaigns() {
                                 <p className="font-bold text-brand-text">{item.fullName}</p>
                                 <p className="text-[9px] text-brand-text-mute mt-0.5">{item.code}</p>
                               </td>
-                              <td className="py-3.5 px-2 text-center font-mono font-bold">{item.meetingsBooked}</td>
-                              <td className="py-3.5 px-2 text-center font-mono font-bold text-brand-green">{item.showups}</td>
-                              <td className="py-3.5 px-2 text-center font-mono text-brand-text-soft">{item.noShows}</td>
-                              <td className="py-3.5 px-2 text-center font-mono text-brand-text-soft">{item.cancelledMeetings}</td>
+                              <td className="py-3.5 px-2 text-center font-mono font-bold">
+                                {isAdmin ? perfInput(item.employeeId, 'meetingsBooked', `Meetings booked for ${item.fullName}`, 'text-brand-text') : item.meetingsBooked}
+                              </td>
+                              <td className="py-3.5 px-2 text-center font-mono font-bold text-brand-green">
+                                {isAdmin ? perfInput(item.employeeId, 'showups', `Show-ups for ${item.fullName}`, 'text-brand-green font-bold') : item.showups}
+                              </td>
+                              <td className="py-3.5 px-2 text-center font-mono text-brand-text-soft">
+                                {isAdmin ? perfInput(item.employeeId, 'noShows', `No-shows for ${item.fullName}`, 'text-brand-text-soft') : item.noShows}
+                              </td>
+                              <td className="py-3.5 px-2 text-center font-mono text-brand-text-soft">
+                                {isAdmin ? perfInput(item.employeeId, 'cancelledMeetings', `Cancelled meetings for ${item.fullName}`, 'text-brand-text-soft') : item.cancelledMeetings}
+                              </td>
                               <td className="py-3.5 px-2 text-right font-mono font-bold text-brand-green">PKR {item.commissionEarned.toLocaleString()}</td>
                               {isAdmin && (
                                 <td className="py-3.5 px-2 text-center">
-                                  <button
-                                    onClick={() => handleRemoveMember(item.employeeId)}
-                                    className="p-1 rounded text-brand-text-mute hover:text-brand-amber transition-colors cursor-pointer"
-                                    title="Unassign Member"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
+                                  <div className="flex items-center justify-center gap-1">
+                                    <button
+                                      onClick={() => saveAdminPerformance(item.employeeId)}
+                                      disabled={perfSavingId === item.employeeId}
+                                      className="p-1 rounded text-brand-text-mute hover:text-brand-cyan transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                      title="Save performance"
+                                      aria-label={`Save performance for ${item.fullName}`}
+                                    >
+                                      <Save className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      onClick={() => handleRemoveMember(item.employeeId)}
+                                      className="p-1 rounded text-brand-text-mute hover:text-brand-amber transition-colors cursor-pointer"
+                                      title="Unassign Member"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
                                 </td>
                               )}
                             </tr>
                           ))}
+
+                          {/* The lead's own metrics — kept out of the ranking and the team totals. */}
+                          {isAdmin && dashboardData.campaign.teamLeadId && (
+                            <tr className="border-t-2 border-brand-border/60 bg-brand-bg-elevated/20">
+                              <td className="py-3.5 px-2 font-mono text-brand-text-mute">—</td>
+                              <td className="py-3.5 px-2">
+                                <p className="font-bold text-brand-text">{dashboardData.campaign.teamLead}</p>
+                                <p className="text-[9px] text-brand-text-mute mt-0.5 uppercase tracking-widest">Team Lead · own metrics</p>
+                              </td>
+                              <td className="py-3.5 px-2 text-center">
+                                {perfInput(dashboardData.campaign.teamLeadId, 'meetingsBooked', 'Meetings booked for the team lead', 'text-brand-text')}
+                              </td>
+                              <td className="py-3.5 px-2 text-center">
+                                {perfInput(dashboardData.campaign.teamLeadId, 'showups', 'Show-ups for the team lead', 'text-brand-green font-bold')}
+                              </td>
+                              <td className="py-3.5 px-2 text-center font-mono text-brand-text-mute">—</td>
+                              <td className="py-3.5 px-2 text-center font-mono text-brand-text-mute">—</td>
+                              <td className="py-3.5 px-2 text-right font-mono font-bold text-brand-text">PKR {(dashboardData.stats.teamLeadCommission || 0).toLocaleString()}</td>
+                              <td className="py-3.5 px-2 text-center">
+                                <button
+                                  onClick={() => saveAdminPerformance(dashboardData.campaign.teamLeadId)}
+                                  disabled={perfSavingId === dashboardData.campaign.teamLeadId}
+                                  className="p-1 rounded text-brand-text-mute hover:text-brand-cyan transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                  title="Save performance"
+                                  aria-label="Save performance for the team lead"
+                                >
+                                  <Save className="w-3.5 h-3.5" />
+                                </button>
+                              </td>
+                            </tr>
+                          )}
 
                           {dashboardData.leaderboard.length === 0 && (
                             <tr>

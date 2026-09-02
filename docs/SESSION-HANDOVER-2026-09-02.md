@@ -6,7 +6,8 @@ Three bodies of work, in order:
 1. **Google sign-in lockout + RBAC + admin password reset** — committed `531d0b9`, deployed.
 2. **Full security & correctness audit** — 59 findings, published as an artifact.
 3. **Four critical fixes + two new features + a review pass** — committed and pushed
-   (one commit: "Stop the silent payroll losses, and open performance entry to leads and SDRs").
+   (commit "Stop the silent payroll losses, and open performance entry to leads and SDRs"),
+   followed by an admin performance editor on the Campaigns page in its own commit.
 
 ---
 
@@ -75,6 +76,7 @@ most urgent outstanding item. Scripts: `backend/src/scripts/create-admin-account
 | `frontend/src/pages/Employees.jsx` | delete confirm copy matches the new guard |
 | `frontend/src/pages/SDRDashboard.jsx` | Feature 2 — SDR self-service metric entry |
 | `frontend/src/pages/TeamLeadDashboard.jsx` | Feature 1 — editable roster + lead's own row |
+| `frontend/src/pages/Campaigns.jsx` | Admin performance editor on the dashboard tab (follow-up commit) |
 
 ### Fix C2 — payroll no longer pays commission on zero show-ups
 
@@ -152,6 +154,16 @@ Both entry points enforce: whole numbers, non-negative, show-ups no greater than
 > harder control is wanted, add a review/lock step before payroll consumes the numbers —
 > flagged for a product decision, not built.
 
+### Admin performance editor (follow-up request)
+
+`frontend/src/pages/Campaigns.jsx`, dashboard tab: a **Period** (month/year) selector, an
+editable leaderboard (Booked / Show-ups / No-shows / Cancelled per row + Save), and a row
+for the Team Lead's own metrics. Same `POST /campaigns/performance` endpoint (admins are
+unrestricted server-side), same client rules (whole numbers, non-negative, show-ups no
+greater than meetings). Unsaved edits survive a per-row save; switching campaign or period
+reseeds from that period's logged figures. The lead row sends only the two headline
+figures so stored no-show/cancelled counts are not zeroed.
+
 ### Review pass (before push)
 
 A line-by-line re-read of the whole diff found five gaps, all fixed:
@@ -180,8 +192,6 @@ the two new ones (there was previously **no** UI to log performance at all).
 ## Still open
 
 - **Item 1 — rotate `Brandigade2026!`, delete the two seed scripts.** Most urgent.
-- Admins have no UI to log `CampaignPerformance` directly (only Team Leads and SDRs do);
-  admins can still override at payroll time. A small follow-up if wanted.
 - The remaining 50+ audit findings (High/Medium/Low) — see the audit artifact.
 - Live database password state for the admin accounts could not be verified from this
   session. Rotate regardless.
